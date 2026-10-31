@@ -1,5 +1,6 @@
 <script lang="ts">
   import { fade, fly } from "svelte/transition";
+import { onDestroy } from "svelte";
   import {
     Settings,
     X,
@@ -232,44 +233,53 @@
     }
   }
 
+  function saveNow() {
+    clearTimeout(saveTimer);
+    storage.setItems([
+      { key: "sync:detection-min-confidence", value: detectionMinConfidence },
+      { key: "sync:skip-bbox-refining", value: skipBboxRefining },
+      { key: "sync:auto-translate", value: autoTranslate },
+      { key: "sync:auto-translate-concurrency", value: autoTranslateConcurrency },
+      { key: "sync:ocr-min-confidence", value: ocrMinConfidence },
+      { key: "local:gemini-key", value: geminiKey },
+      { key: "sync:gemini-model", value: geminiModel },
+      { key: "sync:source-lang", value: sourceLang },
+      { key: "sync:target-lang", value: targetLang },
+      { key: "sync:detection-model", value: detectionModel },
+      { key: "sync:current-mode", value: currentMode },
+      { key: `sync:context-${seriesName}`, value: $state.snapshot(seriesContext) },
+      { key: "sync:text-font", value: textFont },
+      { key: "local:custom-fonts", value: $state.snapshot(customFonts) },
+      { key: "sync:llm-model", value: llmModel },
+      { key: "sync:llm-temperature", value: llmTemperature },
+      { key: "local:server-host", value: serverHost },
+      { key: "local:server-schema", value: serverSchema },
+      { key: "local:server-model", value: serverModel },
+      { key: "local:use-server-api-key", value: useServerApiKey },
+      { key: "local:server-api-key", value: serverApiKey },
+      { key: "sync:custom-site-rules", value: $state.snapshot(customRules) },
+      { key: "sync:inpaint-method", value: inpaintMethod },
+      { key: "sync:always-inpaint", value: alwaysInpaint },
+      { key: "sync:ocr-engine", value: ocrEngine },
+      { key: "sync:script-gate", value: scriptGate },
+    ]);
+  }
+
   function debouncedSave() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      storage.setItems([
-        { key: "sync:detection-min-confidence", value: detectionMinConfidence },
-        { key: "sync:skip-bbox-refining", value: skipBboxRefining },
-        { key: "sync:auto-translate", value: autoTranslate },
-        { key: "sync:auto-translate-concurrency", value: autoTranslateConcurrency },
-        { key: "sync:ocr-min-confidence", value: ocrMinConfidence },
-        { key: "local:gemini-key", value: geminiKey },
-        { key: "sync:gemini-model", value: geminiModel },
-        { key: "sync:source-lang", value: sourceLang },
-        { key: "sync:target-lang", value: targetLang },
-        { key: "sync:detection-model", value: detectionModel },
-        { key: "sync:current-mode", value: currentMode },
-        { key: `sync:context-${seriesName}`, value: $state.snapshot(seriesContext) },
-        { key: "sync:text-font", value: textFont },
-        { key: "local:custom-fonts", value: $state.snapshot(customFonts) },
-        { key: "sync:llm-model", value: llmModel },
-        { key: "sync:llm-temperature", value: llmTemperature },
-        { key: "local:server-host", value: serverHost },
-        { key: "local:server-schema", value: serverSchema },
-        { key: "local:server-model", value: serverModel },
-        { key: "local:use-server-api-key", value: useServerApiKey },
-        { key: "local:server-api-key", value: serverApiKey },
-        { key: "sync:custom-site-rules", value: $state.snapshot(customRules) },
-        { key: "sync:inpaint-method", value: inpaintMethod },
-        { key: "sync:always-inpaint", value: alwaysInpaint },
-        { key: "sync:ocr-engine", value: ocrEngine },
-        { key: "sync:script-gate", value: scriptGate },
-      ]);
+      saveNow();
     }, 150);
   }
+
+  onDestroy(() => {
+    saveNow();
+  });
 
   $effect(() => {
     if (loadingSettings) return;
     [
-      detectionMinConfidence, skipBboxRefining, autoTranslate, autoTranslateConcurrency, ocrMinConfidence, scriptGate,
+      detectionMinConfidence, skipBboxRefining, autoTranslate, autoTranslateConcurrency, ocrMinConfidence, scriptGate, ocrEngine,
       geminiKey, geminiModel, sourceLang, targetLang, detectionModel, currentMode,
       seriesContext.seriesName, seriesContext.summary, seriesContext.dictionary,
       textFont, customFonts.length, inpaintMethod, alwaysInpaint, llmModel, llmTemperature,
