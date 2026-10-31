@@ -443,7 +443,7 @@ export default defineContentScript({
                     detectionMinConfidence: (cfg["sync:detection-min-confidence"] as number | undefined) ?? DefaultConfig.detectionMinConfidence,
                     temperature: (cfg["sync:llm-temperature"] as number | undefined) ?? DefaultConfig.llmTemperature,
                     serverSchema: (cfg["local:server-schema"] as string | undefined) ?? DefaultConfig.serverSchema,
-                    geminiModel: (cfg["sync:gemini-model"] as string | undefined) ?? DefaultConfig.geminiModels[0].id,
+                    geminiModel: (cfg["sync:gemini-model"] as string | undefined) ?? DefaultConfig.geminiModels[4].id,
                     ocrModel: DefaultConfig.ocrModelPath(
                       resolveLangGroup(srcLang).group,
                     ),
