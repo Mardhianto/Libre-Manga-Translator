@@ -148,9 +148,13 @@ export function wrapText(
 
           let chunk = "";
           for (const char of word) {
-            const trial = chunk + char + "-";
+            const prevChar = chunk.slice(-1);
+            const needsHyphen =
+              /[A-Za-z0-9]/.test(prevChar) && /[A-Za-z0-9]/.test(char);
+            const suffix = needsHyphen ? "-" : "";
+            const trial = chunk + char + suffix;
             if (ctx.measureText(trial).width > maxW && chunk) {
-              lines.push(chunk + "-");
+              lines.push(chunk + suffix);
               chunk = char;
             } else {
               chunk += char;

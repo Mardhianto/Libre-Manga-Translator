@@ -24,4 +24,6 @@ export default {
   },
   containerSelector: ".reader-container, #reader",
   imageSelector: ".reader-container img, .chapter-images img",
+  pillPosition: "top-left",
+  toolbarPosition: "top-left",
 } satisfies SiteRule;

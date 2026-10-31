@@ -123,10 +123,11 @@ describe("Mode naming is honest", () => {
   });
 
   it("privacy.md and technical.md do not resurrect the blanket claim", () => {
+    // GPU claims must be scoped per stage and point at the denylist, not blanket.
+    expect(read("../../docs/technical.md")).toMatch(/### What runs on GPU/);
+
     for (const file of ["../../docs/technical.md", "../../privacy.md"]) {
       const text = read(file);
-      // GPU claims must be scoped per stage and point at the denylist, not blanket.
-      expect(text).toMatch(/### What runs on GPU/);
       expect(text, `${file} advertises every stage as GPU-accelerated`).not.toMatch(
         /all stages.{0,40}GPU/i,
       );

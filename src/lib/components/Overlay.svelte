@@ -11,7 +11,9 @@
     EditorToolbar,
     InpaintCanvasEditor,
     BubbleEditor,
+    Toasts,
   } from "@/lib/components/overlay";
+  import type { OverlayToast, ToastKind } from "@/lib/components/overlay/toasts";
   import type { InpaintPatch } from "@/lib/components/overlay/InpaintCanvasEditor.svelte";
   import type { EditorLayer, InpaintTool } from "@/lib/components/overlay/EditorToolbar.svelte";
 
@@ -20,6 +22,7 @@
     scaleX: number;
     scaleY: number;
     originalSrc: string;
+    rawImageUrl?: string;
     wrapper: HTMLElement;
     getTranslationCache: () => Promise<
       | {
@@ -35,7 +38,11 @@
     requestTextTranslation: (
       bboxes: Bbox[],
       isManuallySorted: boolean,
-      opts?: { gateForce?: boolean },
+      opts?: {
+        gateForce?: boolean;
+        transient?: boolean;
+        rawText?: string;
+      },
     ) => Promise<
       | {
           translations: Translations;
@@ -66,6 +73,7 @@
     scaleX,
     scaleY,
     originalSrc,
+    rawImageUrl,
     wrapper,
     getTranslationCache,
     requestBubbleDetection,
@@ -78,7 +86,32 @@
     applyInpaintPatches,
   }: Props = $props();
 
-  let toolbarPosition = $state({ x: 0, y: 12 }); // center-top initial, viewport-relative
+  const rawDisplaySrc = $derived(rawImageUrl || originalSrc);
+
+  function getInitialToolbarPosition(): { x: number; y: number } {
+    try {
+      const saved = localStorage.getItem("lmt-toolbar-pos");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (typeof parsed?.x === "number" && typeof parsed?.y === "number") {
+          return {
+            x: Math.max(16, Math.min(window.innerWidth - 380, parsed.x)),
+            y: Math.max(80, Math.min(window.innerHeight - 90, parsed.y)),
+          };
+        }
+      }
+    } catch {}
+
+    // Default to Bottom-Left of the target manga/viewport
+    const defaultX = Math.max(16, Math.min(window.innerWidth - 380, targetImageRect.left + 20));
+    const defaultY = Math.min(
+      window.innerHeight - 95,
+      Math.max(80, targetImageRect.bottom - 95)
+    );
+    return { x: defaultX, y: defaultY };
+  }
+
+  let toolbarPosition = $state(getInitialToolbarPosition());
   let toolbarDragStart = $state<{ startX: number; startY: number; initialX: number; initialY: number } | null>(null);
   let readingDirection = $state<"rtl" | "ltr">("rtl");
   let mode = $state<"loading" | "refining" | "results" | "editing">("loading");
@@ -109,6 +142,158 @@
   let loadingMsg = $state("Detecting text…");
   let errorMsg = $state("");
   let errorTimer: ReturnType<typeof setTimeout>;
+
+  function generateBoxId(): string {
+    return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  const MAX_RETRANSLATE_QUEUE = 5;
+  let retranslatingBoxIds = $state<
+    Record<string, { label: string; draftAtRequest: string; mode: "ocr" | "raw" }>
+  >({});
+  let toasts = $state<OverlayToast[]>([]);
+  const toastTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  function dismissToast(id: string) {
+    const timer = toastTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      toastTimers.delete(id);
+    }
+    toasts = toasts.filter((t) => t.id !== id);
+  }
+
+  function addToast(message: string, kind: ToastKind = "info") {
+    const existing = toasts.find((t) => t.message === message);
+    const id = existing ? existing.id : generateBoxId();
+
+    const duration =
+      kind === "error"
+        ? 6000
+        : kind === "warn"
+          ? 4500
+          : 3500;
+
+    const oldTimer = toastTimers.get(id);
+    if (oldTimer) clearTimeout(oldTimer);
+
+    const newTimer = setTimeout(() => dismissToast(id), duration);
+    toastTimers.set(id, newTimer);
+
+    if (existing) {
+      toasts = toasts.map((t) => (t.id === id ? { ...t, kind } : t));
+    } else {
+      const updated = [...toasts, { id, kind, message }];
+      if (updated.length > 4) {
+        const dropped = updated.shift()!;
+        const dt = toastTimers.get(dropped.id);
+        if (dt) {
+          clearTimeout(dt);
+          toastTimers.delete(dropped.id);
+        }
+      }
+      toasts = updated;
+    }
+  }
+
+  function isRetranslatingBox(index: number): boolean {
+    const id = bboxes[index]?.id;
+    return !!(id && retranslatingBoxIds[id]);
+  }
+
+  async function handleRetranslateBox(index: number, skipOcr: boolean) {
+    const box = bboxes[index];
+    if (!box || !box.id) return;
+    const boxId = box.id;
+
+    if (retranslatingBoxIds[boxId]) {
+      addToast(`Box #${index + 1} is already being retranslated.`, "warn");
+      return;
+    }
+
+    if (Object.keys(retranslatingBoxIds).length >= MAX_RETRANSLATE_QUEUE) {
+      addToast("Retranslation queue is full (5/5). Please wait for a free slot.", "warn");
+      return;
+    }
+
+    const sourceText = sourceTexts[index] ?? "";
+    if (skipOcr && !sourceText.trim()) {
+      addToast(`Box #${index + 1} has no captured text to translate.`, "warn");
+      return;
+    }
+
+    const draftAtRequest = editDrafts[index] ?? "";
+    const label = `Box #${index + 1}`;
+    const retransMode = skipOcr ? "raw" : "ocr";
+
+    retranslatingBoxIds = {
+      ...retranslatingBoxIds,
+      [boxId]: { label, draftAtRequest, mode: retransMode },
+    };
+
+    try {
+      const boxSnapshot = $state.snapshot(box);
+      const result = await requestTextTranslation(
+        [boxSnapshot],
+        isManuallySorted,
+        {
+          gateForce: true,
+          transient: true,
+          rawText: skipOcr ? sourceText : undefined,
+        },
+      );
+
+      if (mode !== "editing") {
+        addToast(`${label} retranslated, but editor was closed.`, "info");
+        return;
+      }
+
+      const targetIndex = bboxes.findIndex((b) => b.id === boxId);
+      if (targetIndex === -1) {
+        addToast(`${label} was deleted — retranslation discarded.`, "warn");
+        return;
+      }
+
+      if (typeof result === "object" && "error" in result) {
+        addToast(`Retranslation failed: ${result.error}`, "error");
+        return;
+      }
+
+      const newText = result.translations?.[0];
+      if (newText === undefined || newText === null) {
+        addToast(`Nothing readable in ${label}.`, "warn");
+        return;
+      }
+
+      if (editDrafts[targetIndex] !== draftAtRequest) {
+        addToast(
+          `${label} draft was modified — retranslation discarded to protect edits.`,
+          "info",
+        );
+        return;
+      }
+
+      editDrafts = editDrafts.map((d, k) => (k === targetIndex ? newText : d));
+
+      if (!skipOcr && result.sourceTexts?.[0]) {
+        sourceTexts = sourceTexts.map((s, k) =>
+          k === targetIndex ? result.sourceTexts![0] : s,
+        );
+      }
+
+      const successMsg = skipOcr
+        ? `Box #${targetIndex + 1} retranslated from captured text. Press Apply to save.`
+        : `Box #${targetIndex + 1} retranslated (OCR re-read). Press Apply to save.`;
+      addToast(successMsg, "success");
+    } catch (err) {
+      addToast(`Retranslation error: ${(err as Error).message}`, "error");
+    } finally {
+      const next = { ...retranslatingBoxIds };
+      delete next[boxId];
+      retranslatingBoxIds = next;
+    }
+  }
+
 
   // Live geometry: mount props go stale when readers re-layout on page
   // change (the translated copy then renders smaller/offset). The content
@@ -391,7 +576,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
         .filter((p) => p.type === "restore-raw")
         .map((p) => ({ x1: p.x1, y1: p.y1, x2: p.x2, y2: p.y2, confidence: 1 }));
       try {
-        cleanedUrl = await applyInpaintPatches(cleanedUrl || originalSrc, added, removed);
+        cleanedUrl = await applyInpaintPatches(cleanedUrl || rawDisplaySrc, added, removed);
         inpaintPatches = [];
       } catch (err) {
         showError("Failed to apply inpaint patches: " + (err as Error).message);
@@ -434,6 +619,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     const box = $state.snapshot(bboxes[i]);
     const result = await requestTextTranslation([box], true, {
       gateForce: true,
+      transient: true,
     });
     forcingIndex = null;
     if (typeof result === "object" && "error" in result) {
@@ -467,17 +653,17 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     let layerType = "result";
     if (mode === "editing") {
       if (activeEditorLayer === "raw") {
-        targetUrl = originalSrc;
+        targetUrl = rawDisplaySrc;
         layerType = "raw";
       } else if (activeEditorLayer === "cleaned") {
-        targetUrl = cleanedUrl || originalSrc;
+        targetUrl = cleanedUrl || rawDisplaySrc;
         layerType = "cleaned";
       } else {
         targetUrl = translatedUrl;
         layerType = "result";
       }
     } else if (showOriginal) {
-      targetUrl = originalSrc;
+      targetUrl = rawDisplaySrc;
       layerType = "raw";
     }
 
@@ -549,6 +735,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     bboxes = [
       ...bboxes,
       {
+        id: generateBoxId(),
         x1: startX,
         y1: startY,
         x2: startX + boxW,
@@ -659,7 +846,8 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
           Number.isFinite(b.y2) &&
           b.x2 > b.x1 &&
           b.y2 > b.y1,
-      );
+      )
+      .map((b) => ({ ...b, id: b.id ?? generateBoxId() }));
 
     applyBboxesSort();
     if (initialCache) {
@@ -816,8 +1004,8 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
           const dx = e.clientX - toolbarDragStart.startX;
           const dy = e.clientY - toolbarDragStart.startY;
           toolbarPosition = {
-            x: toolbarDragStart.initialX + dx,
-            y: toolbarDragStart.initialY + dy,
+            x: Math.max(10, Math.min(window.innerWidth - 320, toolbarDragStart.initialX + dx)),
+            y: Math.max(10, Math.min(window.innerHeight - 80, toolbarDragStart.initialY + dy)),
           };
           return;
         }
@@ -875,6 +1063,11 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
           isManuallySorted = true;
           saveHistory();
         }
+      }
+      if (toolbarDragStart) {
+        try {
+          localStorage.setItem("lmt-toolbar-pos", JSON.stringify(toolbarPosition));
+        } catch {}
       }
       dragInfo = null;
       toolbarDragStart = null;
@@ -942,10 +1135,35 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     };
   });
 
+  let isWrapperHovered = $state(false);
+
+  $effect(() => {
+    if (!wrapper) return;
+    const onEnter = () => {
+      isWrapperHovered = true;
+    };
+    const onLeave = () => {
+      isWrapperHovered = false;
+    };
+    wrapper.addEventListener("mouseenter", onEnter);
+    wrapper.addEventListener("mouseleave", onLeave);
+    return () => {
+      wrapper.removeEventListener("mouseenter", onEnter);
+      wrapper.removeEventListener("mouseleave", onLeave);
+    };
+  });
+
   $effect(() => {
     if (wrapper) {
       wrapper.setAttribute("data-lmt-mode", mode);
       wrapper.setAttribute("data-lmt-progress", loadingMsg);
+      const isInteractive = mode === "refining" || mode === "editing";
+      const zVal = isInteractive ? (isWrapperHovered ? "60" : "50") : "";
+      wrapper.style.zIndex = zVal;
+      const parent = wrapper.parentElement;
+      if (parent) {
+        parent.style.zIndex = zVal;
+      }
       wrapper.dispatchEvent(
         new CustomEvent("lmt:mode-change", { detail: { mode }, bubbles: true }),
       );
@@ -1013,6 +1231,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       canRedo={historyIndex < history.length - 1}
       position={toolbarPosition}
       isDragActive={dragInfo !== null}
+      isDraggingToolbar={toolbarDragStart !== null}
       {readingDirection}
       onDragStart={(e) => {
         toolbarDragStart = {
@@ -1052,13 +1271,13 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
 
   {#if mode === "results"}
     <img
-      src={showOriginal ? originalSrc : translatedUrl}
+      src={showOriginal ? rawDisplaySrc : translatedUrl}
       alt={showOriginal ? "Original Img" : "Translated Img"}
       class="w-full h-full object-contain select-none pointer-events-none"
     />
     {#if !showOriginal}
       {#each bboxes as box, i}
-        {#if box.gateSkip}
+        {#if box.gateSkip && !translations[i]}
           <div
             class="absolute border-2 border-dashed border-amber-500/90 rounded-sm pointer-events-none z-30"
             style:left="{box.x1 * liveScaleX}px"
@@ -1085,7 +1304,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
             </button>
           </div>
         {/if}
-        {#if box.inpaintDeclined && !box.gateSkip}
+        {#if box.inpaintDeclined && (!box.gateSkip || translations[i])}
           <div
             class="absolute border-2 border-dotted border-rose-500/80 rounded-sm pointer-events-none z-30"
             style:left="{box.x1 * liveScaleX}px"
@@ -1128,7 +1347,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
   {#if mode === "editing"}
     <!-- Layer image rendering based on activeEditorLayer -->
     <img
-      src={activeEditorLayer === "raw" ? originalSrc : (cleanedUrl || translatedUrl)}
+      src={activeEditorLayer === "raw" ? rawDisplaySrc : (cleanedUrl || translatedUrl)}
       alt="Manga Scan Layer"
       class="w-full h-full object-contain select-none pointer-events-none"
     />
@@ -1164,6 +1383,8 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
         onUpdateStyle={(i, style) => {
           bboxes[i] = { ...bboxes[i], style };
         }}
+        {isRetranslatingBox}
+        onRetranslateBox={handleRetranslateBox}
       />
     {/if}
 
@@ -1187,6 +1408,8 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     />
   {/if}
 
+  <Toasts {toasts} onDismiss={dismissToast} />
+  
   {#if errorMsg}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->

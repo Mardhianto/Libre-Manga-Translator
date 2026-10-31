@@ -81,7 +81,7 @@ In Gemini mode the Debug Panel reports the gate as `off` because nothing gated. 
 
 | Bounding Box Refinement & Reading Order | In-Place Translation & OCR Inspection Modal |
 | :---: | :---: |
-| ![Refine Boxes](docs/images/refine-editor.jpg) | ![Edit Modal](docs/images/edit-modal.jpg) |
+| ![Refine Boxes](docs/images/refine-editor.jpg) | ![Typeset Mode](docs/images/typeset-mode.jpg) |
 
 </details>
 

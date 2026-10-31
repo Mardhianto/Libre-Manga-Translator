@@ -1,5 +1,15 @@
 export type ExtractSource = "title" | "path" | "hash";
 
+export type PillPosition =
+  | "top-left"
+  | "top"
+  | "top-right"
+  | "left"
+  | "right"
+  | "bottom-left"
+  | "bottom"
+  | "bottom-right";
+
 export interface SiteRule {
   id: string;
   domain: string;
@@ -19,6 +29,10 @@ export interface SiteRule {
   containerSelector?: string;
   /** CSS selector targeting chapter page <img> elements */
   imageSelector?: string;
+  /** Where to anchor the floating translate pill on each image */
+  pillPosition?: PillPosition;
+  /** Where to initially position the floating toolbar overlay */
+  toolbarPosition?: PillPosition;
 }
 
 // TRUSTED CORE RULES (maintained by LMT maintainers)
@@ -44,6 +58,8 @@ export const COMMUNITY_RULES: SiteRule[] = [
     },
     containerSelector: ".md--reader-chapter",
     imageSelector: ".md--page img.img, .md--reader-chapter img[src^='blob:']",
+    pillPosition: "top-left",
+    toolbarPosition: "top-left",
   },
   {
     id: "nhentai",
@@ -60,6 +76,8 @@ export const COMMUNITY_RULES: SiteRule[] = [
       regex: "\\/g\\/\\d+\\/(\\d+)\\/?$",
       source: "path",
     },
+    pillPosition: "top-left",
+    toolbarPosition: "top-left",
   }
 ];
 

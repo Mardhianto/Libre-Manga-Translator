@@ -1,6 +1,7 @@
 import { DefaultConfig } from "@/lib/configs";
 import { getSiteRule } from "@/lib/adapters";
 import { quickHash, resolveImagePageIndex } from "./utils";
+import type { MangaTargetElement } from "@/lib/canvas";
 import { storage } from "#imports";
 
 /**
@@ -20,7 +21,7 @@ export function srcKeyOf(src: string): string {
 }
 
 export async function resolveCacheKey(
-  img: HTMLImageElement,
+  img: MangaTargetElement,
   originalSrc: string,
 ): Promise<string> {
   const { seriesName, chapterId, pageIndex } = await getSiteRule();

@@ -343,7 +343,7 @@
       <div class="space-y-2">
         {#each customRules as rule}
           <div
-            class="overflow-y-scroll max-h-75 flex items-center justify-between p-2 bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-sm"
+            class="overflow-y-scroll custom-scrollbar max-h-75 flex items-center justify-between p-2 bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-lg shadow-sm"
           >
             <div class="flex items-center gap-2 overflow-hidden">
               <FileCode size={14} class="text-blue-500 shrink-0" />

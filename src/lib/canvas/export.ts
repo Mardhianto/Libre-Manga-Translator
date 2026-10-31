@@ -1,5 +1,40 @@
-export function imageToBase64(img: HTMLImageElement): string | null {
+export type MangaTargetElement = HTMLImageElement | HTMLCanvasElement;
+
+let taintedCanvasCounter = 0;
+
+export function getElementSrc(
+  el: MangaTargetElement,
+  forceRefresh = false,
+): string {
+  if (el instanceof HTMLImageElement) return el.src;
+  if (el instanceof HTMLCanvasElement) {
+    if (!forceRefresh && (el as any).__lmt_src) {
+      return (el as any).__lmt_src;
+    }
+    try {
+      const dataUrl = el.toDataURL("image/jpeg", 0.95);
+      (el as any).__lmt_src = dataUrl;
+      return dataUrl;
+    } catch {
+      if (!(el as any).__lmt_src) {
+        taintedCanvasCounter += 1;
+        (el as any).__lmt_src = `canvas://lmt-tainted-${taintedCanvasCounter}-${el.width}x${el.height}`;
+      }
+      return (el as any).__lmt_src;
+    }
+  }
+  return "";
+}
+
+export function imageToBase64(img: MangaTargetElement): string | null {
   try {
+    if (img instanceof HTMLCanvasElement) {
+      const dataUrl = img.toDataURL("image/jpeg", 0.95);
+      if (!(img as any).__lmt_src || String((img as any).__lmt_src).startsWith("data:")) {
+        (img as any).__lmt_src = dataUrl;
+      }
+      return dataUrl;
+    }
     const width = img.naturalWidth;
     const height = img.naturalHeight;
     if (!width || !height) return null;

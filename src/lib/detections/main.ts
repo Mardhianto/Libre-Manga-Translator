@@ -53,21 +53,22 @@ export async function detectTextBubble(
 ): Promise<Bbox[]> {
   // Defensive: ensure valid detection model id at the gate.
   requestedModel = normalizeDetectionModel(requestedModel);
-  if (session && currentModelName !== requestedModel) {
-    try {
-      await session.release();
-    } catch (error) {
-      console.warn("Failed to cleanly release the previous session:", error);
-    }
-    session = null;
-  }
-
-  if (!session) {
-    session = await loadDetectionSession(requestedModel);
-    currentModelName = requestedModel;
-  }
 
   const result = await runExclusive(async () => {
+    if (session && currentModelName !== requestedModel) {
+      try {
+        await session.release();
+      } catch (error) {
+        console.warn("Failed to cleanly release the previous session:", error);
+      }
+      session = null;
+    }
+
+    if (!session) {
+      session = await loadDetectionSession(requestedModel);
+      currentModelName = requestedModel;
+    }
+
     if (!session) throw new Error("Detection session uninitialized");
     await yieldToMain();
 

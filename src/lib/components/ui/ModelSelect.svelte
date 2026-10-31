@@ -129,11 +129,14 @@
     if (!isOpen) return;
 
     function onDocClick(e: MouseEvent) {
-      const path = typeof e.composedPath === "function" ? e.composedPath() : [];
-      if (rootEl && (path.includes(rootEl) || path.includes(buttonEl as Node))) return;
-      if (listEl && (path.includes(listEl) || (e.target instanceof Node && listEl.contains(e.target)))) return;
-      if (rootEl && e.target instanceof Node && rootEl.contains(e.target)) return;
-      isOpen = false;
+      // rAF guard: skip the click that opened the dropdown on the same frame.
+      requestAnimationFrame(() => {
+        const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+        if (rootEl && (path.includes(rootEl) || path.includes(buttonEl as Node))) return;
+        if (listEl && (path.includes(listEl) || (e.target instanceof Node && listEl.contains(e.target)))) return;
+        if (rootEl && e.target instanceof Node && rootEl.contains(e.target)) return;
+        isOpen = false;
+      });
     }
 
     function onKey(e: KeyboardEvent) {

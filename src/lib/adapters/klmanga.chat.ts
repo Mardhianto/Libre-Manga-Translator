@@ -25,4 +25,6 @@ export default {
   },
   containerSelector: ".z_content",
   imageSelector: ".z_content img",
+  pillPosition: "top-left",
+  toolbarPosition: "top-left",
 } satisfies SiteRule;

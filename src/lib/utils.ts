@@ -529,19 +529,26 @@ export interface RunLock {
 }
 
 /**
+ * Shared global tail across all ONNX Runtime locks in the same JS context.
+ * ONNX Runtime Web's WASM backend is non-reentrant across sessions in the
+ * same thread ("Session already started"), so all ORT subsystems share one
+ * underlying execution chain while keeping per-subsystem dead-letter counters.
+ */
+let sharedOrtTail: Promise<unknown> = Promise.resolve();
+
+/**
  * FIFO promise serializer with dead-letter isolation.
  * Prevents concurrent inference runs on non-reentrant ONNX sessions.
  * One task rejection never breaks or stalls subsequent tasks in chain.
  */
 export function createRunLock(subsystem = "core"): RunLock {
-  let tail: Promise<unknown> = Promise.resolve();
   let deadLetters = 0;
 
   const lock = function runExclusive<T>(task: () => Promise<T>): Promise<T> {
     // ponytail: unbounded queue; upgrade to bounded semaphore if memory spikes under burst.
     const run = () => task();
-    const result = tail.then(run, run);
-    tail = result.catch((err) => {
+    const result = sharedOrtTail.then(run, run);
+    sharedOrtTail = result.catch((err) => {
       deadLetters++;
       console.error(`[dead-letter:${subsystem}] (#${deadLetters}) Task rejected:`, err);
     });
@@ -550,7 +557,7 @@ export function createRunLock(subsystem = "core"): RunLock {
 
   lock.getDeadLetterCount = () => deadLetters;
   lock.reset = () => {
-    tail = Promise.resolve();
+    sharedOrtTail = Promise.resolve();
     deadLetters = 0;
   };
 

@@ -1,13 +1,14 @@
 import { resolveActiveSiteRule, type SiteRule } from "@/lib/adapters";
 import { storage } from "#imports";
 import * as Registry from "./translation-registry";
+import { getElementSrc, type MangaTargetElement } from "@/lib/canvas";
 
-export type TranslateFn = (img: HTMLImageElement) => Promise<void>;
+export type TranslateFn = (img: MangaTargetElement) => Promise<void>;
 
 export const MANUAL_CONCURRENCY = 3;
 
 export class AutoTranslateQueue {
-  private queue: { img: HTMLImageElement; fn: TranslateFn }[] = [];
+  private queue: { img: MangaTargetElement; fn: TranslateFn }[] = [];
   // Slots are held for the full pipeline lifetime and released on the
   // registry `lmt:translation-status` done/idle events — NOT when
   // translateFn settles (it resolves right after overlay mount, long
@@ -64,8 +65,10 @@ export class AutoTranslateQueue {
     return this.concurrency;
   }
 
-  evict(img: HTMLImageElement) {
-    const k = Registry.srcKeyOf(img.src);
+  evict(img: MangaTargetElement) {
+    const src = getElementSrc(img);
+    if (!src) return;
+    const k = Registry.srcKeyOf(src);
     this.seenKeys.delete(k);
     if (this.inFlight.delete(k) && this.lastTranslateFn) {
       this.drain(this.lastTranslateFn);
@@ -73,10 +76,12 @@ export class AutoTranslateQueue {
   }
 
   enqueue(
-    img: HTMLImageElement,
-    translateFn: (img: HTMLImageElement) => Promise<void>,
+    img: MangaTargetElement,
+    translateFn: (img: MangaTargetElement) => Promise<void>,
   ) {
-    const k = Registry.srcKeyOf(img.src);
+    const src = getElementSrc(img);
+    if (!src) return;
+    const k = Registry.srcKeyOf(src);
     if (
       Registry.isPending(k) ||
       this.inFlight.has(k) ||
@@ -91,74 +96,52 @@ export class AutoTranslateQueue {
     this.drain(translateFn);
   }
 
-  private drain(translateFn: (img: HTMLImageElement) => Promise<void>) {
+  private drain(translateFn: (img: MangaTargetElement) => Promise<void>) {
     while (this.inFlight.size < this.concurrency && this.queue.length > 0) {
       const entry = this.queue.shift()!;
       const targetImg = entry.img;
-      if (!document.body.contains(targetImg)) {
+      const src = getElementSrc(targetImg);
+      if (!src || !document.body.contains(targetImg)) {
         // Skip detached images without consuming a slot
-        this.seenKeys.delete(Registry.srcKeyOf(targetImg.src));
+        if (src) this.seenKeys.delete(Registry.srcKeyOf(src));
         continue;
       }
       // Strict registry guard at drain time as well (covers race between enqueue and drain)
-      const k = Registry.srcKeyOf(targetImg.src);
-      if (
-        Registry.isPending(k) ||
-        this.inFlight.has(k) ||
-        Registry.getStatus(k) === "done"
-      ) {
+      const k = Registry.srcKeyOf(src);
+      if (Registry.isPending(k) || this.inFlight.has(k)) {
+        continue;
+      }
+      if (Registry.getStatus(k) === "done") {
         this.seenKeys.delete(k);
         continue;
       }
+
       this.inFlight.add(k);
-      this.lastTranslateFn = translateFn;
-      // NOTE: translateFn resolves after overlay mount, NOT after the
-      // pipeline finishes. The slot stays in `inFlight` until the
-      // registry fires done/idle. The promise continuation below only
-      // handles the no-op paths (early returns that never mark pending).
-      const fn = entry.fn ?? translateFn;
-      const releaseIfNoop = () => {
-        // translateFn marked pending → the real pipeline owns the slot
-        // until the registry fires done/idle. Already-released (listener
-        // handled a sync done/idle) → nothing to do.
-        // Anything else (early return on stale done, detached, empty src)
-        // will never fire an event → free the slot now.
-        if (Registry.isPending(k) || !this.inFlight.has(k)) {
-          return;
-        }
-        this.inFlight.delete(k);
-        this.seenKeys.delete(k);
-        if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
-      };
-      try {
-        const p = fn(targetImg);
-        // translateFn marks pending synchronously up to its first await,
-        // so check on the microtask after it returns.
-        void Promise.resolve(p).then(releaseIfNoop, (err) => {
-          console.warn("[LMT:auto-translate] Translation failed for image:", err);
-          this.evict(targetImg);
-          try {
-            Registry.markIdle(targetImg.src);
-          } catch {
-            // registry is best-effort here
+      // Fire-and-forget: translateFn sets up its own overlay and async
+      // flow. Failure or done signals through the registry event above.
+      translateFn(targetImg)
+        .then(() => {
+          if (!Registry.isPending(k) && Registry.getStatus(k) !== "done") {
+            this.inFlight.delete(k);
+            this.seenKeys.delete(k);
+            Registry.markIdle(src);
+            if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
           }
+        })
+        .catch((err) => {
+          console.warn("LMT: auto-translate task failed:", err);
+          this.inFlight.delete(k);
+          this.seenKeys.delete(k);
+          Registry.markIdle(src);
+          if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
         });
-      } catch (err) {
-        console.warn("[LMT:auto-translate] Translation failed for image:", err);
-        this.evict(targetImg);
-        try {
-          Registry.markIdle(targetImg.src);
-        } catch {
-          // registry is best-effort here
-        }
-      }
     }
   }
 
-  /** Drop pending auto entries; in-flight slots release via registry events. */
   clear() {
     for (const entry of this.queue) {
-      this.seenKeys.delete(Registry.srcKeyOf(entry.img.src));
+      const src = getElementSrc(entry.img);
+      if (src) this.seenKeys.delete(Registry.srcKeyOf(src));
     }
     this.queue = [];
   }
@@ -177,13 +160,13 @@ export class AutoTranslateOrchestrator {
   private observer: IntersectionObserver | null = null;
   private mutationObserver: MutationObserver | null = null;
   private queue = new AutoTranslateQueue();
-  private observedImages = new WeakSet<HTMLImageElement>();
+  private observedImages = new WeakSet<MangaTargetElement>();
   private activeRule: SiteRule | null = null;
-  private translateFn: ((img: HTMLImageElement) => Promise<void>) | null = null;
+  private translateFn: ((img: MangaTargetElement) => Promise<void>) | null = null;
   private unwatchStorage: (() => void) | null = null;
   private unwatchConcurrency: (() => void) | null = null;
 
-  async init(translateFn: (img: HTMLImageElement) => Promise<void>) {
+  async init(translateFn: (img: MangaTargetElement) => Promise<void>) {
     this.translateFn = translateFn;
 
     await this.applyCap();
@@ -217,7 +200,7 @@ export class AutoTranslateOrchestrator {
   }
 
   /** Manual pill path: shares the same queue even when auto is off. */
-  enqueueManual(img: HTMLImageElement) {
+  enqueueManual(img: MangaTargetElement) {
     if (this.translateFn) {
       this.queue.enqueue(img, this.translateFn);
     }
@@ -242,7 +225,10 @@ export class AutoTranslateOrchestrator {
     this.observer = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
-          if (entry.isIntersecting && entry.target instanceof HTMLImageElement) {
+          if (
+            entry.isIntersecting &&
+            (entry.target instanceof HTMLImageElement || entry.target instanceof HTMLCanvasElement)
+          ) {
             const img = entry.target;
             this.observer?.unobserve(img);
             if (this.translateFn) {
@@ -309,7 +295,7 @@ export class AutoTranslateOrchestrator {
     }
   }
 
-  private isQualifyingImage(img: HTMLImageElement): boolean {
+  private isQualifyingImage(img: MangaTargetElement): boolean {
     if (this.activeRule?.imageSelector) {
       try {
         if (img.matches(this.activeRule.imageSelector)) return true;
@@ -318,9 +304,9 @@ export class AutoTranslateOrchestrator {
       }
     }
 
-    // Generic fallback: images must be strictly > 500px in both dimensions
-    const naturalW = img.naturalWidth;
-    const naturalH = img.naturalHeight;
+    // Generic fallback: images or canvases must be strictly > 500px in both dimensions
+    const naturalW = "naturalWidth" in img ? img.naturalWidth : img.width;
+    const naturalH = "naturalHeight" in img ? img.naturalHeight : img.height;
     const clientW = img.clientWidth || img.offsetWidth;
     const clientH = img.clientHeight || img.offsetHeight;
 
@@ -331,21 +317,28 @@ export class AutoTranslateOrchestrator {
     return clientW > 500 && clientH > 500;
   }
 
-  private observeImage(img: HTMLImageElement) {
+  private observeImage(img: MangaTargetElement) {
     if (this.observedImages.has(img)) return;
-    const k = Registry.srcKeyOf(img.src);
+    const src = getElementSrc(img);
+    if (!src) return;
+    const k = Registry.srcKeyOf(src);
     if (Registry.isPending(k) || Registry.getStatus(k) === "done") return;
 
-    if (img.complete && img.naturalWidth > 0) {
+    const isReady =
+      img instanceof HTMLCanvasElement
+        ? img.width > 0 && img.height > 0
+        : img.complete && img.naturalWidth > 0;
+
+    if (isReady) {
       if (this.isQualifyingImage(img)) {
         this.observedImages.add(img);
         this.observer?.observe(img);
       }
-    } else {
+    } else if (img instanceof HTMLImageElement) {
       const onLoad = () => {
         img.removeEventListener("load", onLoad);
         if (!this.isEnabled) return;
-        const kk = Registry.srcKeyOf(img.src);
+        const kk = Registry.srcKeyOf(getElementSrc(img));
         if (Registry.isPending(kk) || Registry.getStatus(kk) === "done") return;
         if (this.isQualifyingImage(img)) {
           this.observedImages.add(img);
@@ -365,7 +358,7 @@ export class AutoTranslateOrchestrator {
         : document;
 
       try {
-        const matchingImgs = root.querySelectorAll<HTMLImageElement>(
+        const matchingImgs = root.querySelectorAll<MangaTargetElement>(
           this.activeRule.imageSelector,
         );
         matchingImgs.forEach((img) => this.observeImage(img));
@@ -375,8 +368,8 @@ export class AutoTranslateOrchestrator {
       }
     }
 
-    // Fallback scan across all document images
-    const allImages = document.querySelectorAll<HTMLImageElement>("img");
+    // Fallback scan across all document images & canvases
+    const allImages = document.querySelectorAll<MangaTargetElement>("img, canvas");
     allImages.forEach((img) => this.observeImage(img));
   }
 }

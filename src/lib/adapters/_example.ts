@@ -33,4 +33,7 @@ export default {
   // Optional DOM selectors for auto-translation engine:
   containerSelector: ".reader-container",
   imageSelector: ".reader-container img",
+  // Position for the floating translate pill and toolbar after translated
+  pillPosition: "top-left",
+  toolbarPosition: "top-left",
 } satisfies SiteRule;

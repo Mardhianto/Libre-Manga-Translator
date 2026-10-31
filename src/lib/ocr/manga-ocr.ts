@@ -68,14 +68,14 @@ export class MangaOcrEngine implements OcrEngine {
     gateSkip: (GateReason | null)[],
     _options?: { minConfidence?: number },
   ): Promise<SingleOcrResult[]> {
-    await this.ensureModels();
-    if (!this.encoderSession || !this.decoderSession || !this.vocab) {
-      throw new Error("Manga-OCR sessions uninitialized");
-    }
-
     const results: SingleOcrResult[] = new Array(bboxes.length);
 
     return await this.runExclusive(async () => {
+      await this.ensureModels();
+      if (!this.encoderSession || !this.decoderSession || !this.vocab) {
+        throw new Error("Manga-OCR sessions uninitialized");
+      }
+
       for (let i = 0; i < bboxes.length; i++) {
         if (gateSkip[i]) {
           results[i] = { text: "", confidence: 0, failed: false };

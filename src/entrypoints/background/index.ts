@@ -397,10 +397,22 @@ export default defineBackground(() => {
     }
   });
 
-  browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
+  browser.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const respond = createAsyncResponder(sendResponse);
     const respondErr = (err: unknown) =>
       respond({ error: (err as Error).message ?? String(err) });
+
+    if (msg.type === "CAPTURE_VISIBLE_TAB") {
+      const task = async () => {
+        const windowId = sender.tab?.windowId ?? browser.windows.WINDOW_ID_CURRENT;
+        const dataUrl = await browser.tabs.captureVisibleTab(windowId, {
+          format: "png",
+        });
+        return { dataUrl };
+      };
+      keepAliveWhile(task().then(respond).catch(respondErr));
+      return true;
+    }
 
     // Proxy image fetch for cross-origin or hotlink-protected images (Cloudflare, Referer checks).
     // Uses declarativeNetRequest to inject the proper Referer so CDNs accept the request,

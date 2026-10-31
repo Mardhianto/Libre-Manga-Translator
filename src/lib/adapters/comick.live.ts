@@ -24,4 +24,6 @@ export default {
   },
   containerSelector: "main",
   imageSelector: "img[src*='comick'], img.chapter-img",
+  pillPosition: "top-left",
+  toolbarPosition: "top-left",
 } satisfies SiteRule;

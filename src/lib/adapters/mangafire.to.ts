@@ -25,4 +25,6 @@ export default {
   },
   containerSelector: "#wrapper",
   imageSelector: ".reader-container img, .carousel-item img",
+  pillPosition: "top-left",
+  toolbarPosition: "top-left",
 } satisfies SiteRule;

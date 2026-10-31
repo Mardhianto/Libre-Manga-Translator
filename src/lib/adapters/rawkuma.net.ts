@@ -25,4 +25,6 @@ export default {
   },
   containerSelector: "[data-chapter-type=\"manga\"]",
   imageSelector: "[data-image-data] img",
+  pillPosition: "top-left",
+  toolbarPosition: "top-left",
 } satisfies SiteRule;

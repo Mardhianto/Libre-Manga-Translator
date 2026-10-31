@@ -1,7 +1,16 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn, beforeEach, afterEach } from "bun:test";
 import { createRunLock } from "../../src/lib/utils";
 
 describe("createRunLock promise serialization & dead-letter handling", () => {
+  let errSpy: ReturnType<typeof spyOn>;
+
+  beforeEach(() => {
+    errSpy = spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errSpy.mockRestore();
+  });
   it("executes tasks sequentially in FIFO order", async () => {
     const lock = createRunLock("test-fifo");
     const order: number[] = [];

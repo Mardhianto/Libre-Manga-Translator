@@ -27,4 +27,6 @@ export default {
   },
   containerSelector: "#chapter-container, .reader-container",
   imageSelector: "#chapter-container img, .chapter-images img",
+  pillPosition: "top-left",
+  toolbarPosition: "top-left",
 } satisfies SiteRule;

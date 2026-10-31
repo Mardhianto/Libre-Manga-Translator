@@ -19,6 +19,7 @@ interface TextStyle {
 }
 
 interface Bbox {
+  id?: string;
   x1: number;
   y1: number;
   x2: number;
@@ -170,6 +171,10 @@ interface SiteRule {
   containerSelector?: string;
   /** CSS selector targeting chapter page <img> elements */
   imageSelector?: string;
+  /** Where to anchor the floating translate pill on each image */
+  pillPosition?: string,
+  /** Where to initially position the floating toolbar overlay */
+  toolbarPosition?: string,
 }
 
 type AIGeneratedRule = Omit<SiteRule, "id" | "domain">;

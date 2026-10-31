@@ -107,26 +107,6 @@ export class PaddleOcrEngine implements OcrEngine {
     // (PP-OCRv6 manga) keeps its session across language changes.
     const key = `${repo}:${modelFile}`;
 
-    if (this.session && this.currentLangGroup !== key) {
-      console.info(`[ocr] swapping rec model: ${this.currentLangGroup} → ${key}`);
-      await this.release();
-    }
-
-    if (!this.session) {
-      console.info(`[ocr] loading rec model: ${repo}/${modelFile}`);
-      this.session = await downloadArtifactHF(repo, modelFile);
-      this.currentLangGroup = key;
-      // Record provider for future mismatch checks (extension-local probe may flip wasm↔webgpu).
-      try {
-        const maybeProviders = (this.session as unknown as { providers?: string[] })?.providers;
-        this.sessionProvider = Array.isArray(maybeProviders) ? maybeProviders.join("+") : "wasm";
-      } catch {
-        this.sessionProvider = "wasm";
-      }
-    }
-
-    await this.ensureCharset(repo, langGroup);
-
     const crops = bboxes
       .map((bbox, index) =>
         gateSkip[index]
@@ -139,6 +119,26 @@ export class PaddleOcrEngine implements OcrEngine {
       .flat();
 
     const result = await this.runExclusive(async () => {
+      if (this.session && this.currentLangGroup !== key) {
+        console.info(`[ocr] swapping rec model: ${this.currentLangGroup} → ${key}`);
+        await this.release();
+      }
+
+      if (!this.session) {
+        console.info(`[ocr] loading rec model: ${repo}/${modelFile}`);
+        this.session = await downloadArtifactHF(repo, modelFile);
+        this.currentLangGroup = key;
+        // Record provider for future mismatch checks (extension-local probe may flip wasm↔webgpu).
+        try {
+          const maybeProviders = (this.session as unknown as { providers?: string[] })?.providers;
+          this.sessionProvider = Array.isArray(maybeProviders) ? maybeProviders.join("+") : "wasm";
+        } catch {
+          this.sessionProvider = "wasm";
+        }
+      }
+
+      await this.ensureCharset(repo, langGroup);
+
       return await this.runBatches(
         crops,
         batchSize,

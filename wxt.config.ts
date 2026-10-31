@@ -60,10 +60,10 @@ export default defineConfig({
     },
   }),
 
-  manifest: {
+  manifest: ({ browser }) => ({
     name: "Libre Manga Translator",
     version_name: pkg.version,
-    description: "Privacy-focused manga translator: local WebGPU, Gemini cloud, or self-hosted LLM",
+    description: "Free Privacy-focused AI manga translator: local WebGPU, Gemini cloud, or self-hosted LLM",
     permissions: [
       "activeTab",
       "offscreen",
@@ -105,7 +105,15 @@ export default defineConfig({
         id: "libre-manga-translator@mrdhnto",
       },
     },
-  },
+    ...(browser === "firefox" && {
+      browser_specific_settings: {
+        gecko: {
+          id: "libremangatranslator@lmt.tmp",
+          strict_min_version: "148.0",
+        },
+      },
+    }),
+  }),
 
   srcDir: "src",
   modules: ["@wxt-dev/module-svelte"],

@@ -23,4 +23,6 @@ export default {
   },
   containerSelector: "article",
   imageSelector: "article img",
+  pillPosition: "top-left",
+  toolbarPosition: "top-left",
 } satisfies SiteRule;

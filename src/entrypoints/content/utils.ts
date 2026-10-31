@@ -15,6 +15,7 @@ import {
   inpaintLocal,
   wrapText,
   drawFittedText,
+  type MangaTargetElement,
 } from "@/lib/canvas";
 
 export {
@@ -28,6 +29,7 @@ export {
   inpaintLocal,
   wrapText,
   drawFittedText,
+  type MangaTargetElement,
 };
 
 /**
@@ -180,14 +182,16 @@ export async function updateSeriesContext(
  */
 export function syncWrapperGeometry(
   wrapper: HTMLElement,
-  img: HTMLImageElement,
+  img: MangaTargetElement,
 ): boolean {
   const rect = img.getBoundingClientRect();
+  const naturalW = "naturalWidth" in img ? img.naturalWidth : img.width;
+  const naturalH = "naturalHeight" in img ? img.naturalHeight : img.height;
   if (
     rect.width <= 0 ||
     rect.height <= 0 ||
-    !img.naturalWidth ||
-    !img.naturalHeight
+    !naturalW ||
+    !naturalH
   ) {
     return false;
   }
@@ -203,8 +207,8 @@ export function syncWrapperGeometry(
   wrapper.dispatchEvent(
     new CustomEvent("lmt:geometry-change", {
       detail: {
-        scaleX: rect.width / img.naturalWidth,
-        scaleY: rect.height / img.naturalHeight,
+        scaleX: rect.width / naturalW,
+        scaleY: rect.height / naturalH,
         width: rect.width,
         height: rect.height,
       },
@@ -218,10 +222,10 @@ export function createImageObservers(
   originalSrc: string,
   wrapper: HTMLElement,
 ) {
-  // Syncs wrapper visibility to whatever img is currently inside it
+  // Syncs wrapper visibility to whatever img or canvas is currently inside it
   const styleObserver = new MutationObserver(() => {
-    const img = wrapper.querySelector("img");
-    if (img) wrapper.style.display = img.style.display;
+    const el = wrapper.querySelector<HTMLElement>("img, canvas");
+    if (el) wrapper.style.display = el.style.display;
   });
 
   // Keeps the fixed-px wrapper glued to the live image's rendered box.
@@ -233,15 +237,15 @@ export function createImageObservers(
     if (sizeRaf) return;
     sizeRaf = requestAnimationFrame(() => {
       sizeRaf = 0;
-      const img = wrapper.querySelector("img");
-      if (img instanceof HTMLImageElement) syncWrapperGeometry(wrapper, img);
+      const el = wrapper.querySelector<MangaTargetElement>("img, canvas");
+      if (el) syncWrapperGeometry(wrapper, el);
     });
   });
 
   const observeLiveImg = () => {
     sizeObserver.disconnect();
-    const img = wrapper.querySelector("img");
-    if (img instanceof HTMLImageElement) sizeObserver.observe(img);
+    const el = wrapper.querySelector<MangaTargetElement>("img, canvas");
+    if (el) sizeObserver.observe(el);
   };
 
   // Re-attaches wrapper when SPA website remounts a fresh img element
@@ -259,7 +263,7 @@ export function createImageObservers(
 
     domObserver.disconnect();
 
-    wrapper.querySelectorAll("img").forEach((img) => img.remove());
+    wrapper.querySelectorAll("img, canvas").forEach((el) => el.remove());
 
     freshImg.insertAdjacentElement("beforebegin", wrapper);
     wrapper.appendChild(freshImg);
@@ -311,7 +315,7 @@ export function quickHash(str: string): string {
  * 3. Ordinal index among manga images on the page
  */
 export function resolveImagePageIndex(
-  img: HTMLImageElement,
+  img: MangaTargetElement,
   srcUrl: string,
   urlPageIndex: number,
 ): number {
@@ -359,8 +363,12 @@ export function resolveImagePageIndex(
 
   // 3. Positional index among manga images on the page
   try {
-    const allImgs = Array.from(document.querySelectorAll("img")).filter(
-      (el) => el.naturalWidth >= 260 && el.naturalHeight >= 260,
+    const allImgs = Array.from(document.querySelectorAll<MangaTargetElement>("img, canvas")).filter(
+      (el) => {
+        const naturalW = "naturalWidth" in el ? el.naturalWidth : el.width;
+        const naturalH = "naturalHeight" in el ? el.naturalHeight : el.height;
+        return naturalW >= 260 && naturalH >= 260;
+      },
     );
     const idx = allImgs.indexOf(img);
     if (idx >= 0) return idx + 1;

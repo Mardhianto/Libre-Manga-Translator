@@ -129,7 +129,7 @@ test("floating trigger and LMT elements prevent triggering host page wrapper anc
   await expect(trigger).toBeAttached({ timeout: 5000 });
 
   // Clicking floating trigger button must NOT bubble to parent <a onclick="...">
-  const triggerBtn = trigger.locator("button");
+  const triggerBtn = trigger.locator("button[title='Translate manga image']");
   if (await triggerBtn.isVisible()) {
     await triggerBtn.click();
   }
@@ -143,3 +143,52 @@ test("floating trigger and LMT elements prevent triggering host page wrapper anc
   expect(turnCountAfterImgClick).toBe(1);
 });
 
+
+
+test("floating trigger ignores nav-card hovers, honors tap overlays, and hides on stale mapping", async () => {
+  const page = await context.newPage();
+
+  await page.route("https://example.com/pill-scopes", (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: `<!DOCTYPE html>
+<html>
+  <head><title>Pill Scopes</title></head>
+  <body style="margin:0;font-family:sans-serif;">
+    <a id="card" href="#episode-44" style="display:block;width:560px;height:330px;padding:10px;">
+      <img id="cover" src="https://example.com/cover.jpg" style="width:300px;height:300px;display:inline-block;vertical-align:top;" />
+      <span id="card-label" style="display:inline-block;width:220px;">Episode 44</span>
+    </a>
+    <h1 id="chrome" style="margin:8px 0;font-size:20px;">Chapter list</h1>
+    <div id="reader" style="position:relative;width:400px;height:560px;">
+      <img id="page" src="https://example.com/page1.jpg" style="width:400px;height:560px;display:block;" />
+      <div id="tapzone" style="position:absolute;inset:0;"></div>
+    </div>
+  </body>
+</html>`,
+    });
+  });
+
+  await page.goto("https://example.com/pill-scopes");
+  const trigger = page.locator("lmt-floating-trigger");
+  await expect(trigger).toBeAttached({ timeout: 5000 });
+  const pillBtn = trigger.locator("button[title='Translate manga image']");
+
+  // 1. Hovering the padding of an episode CARD (an <a> whose descendant
+  //    thumbnail clears the raw 260px threshold) must NOT summon the pill.
+  const cardBox = await page.locator("#card").boundingBox();
+  await page.mouse.move(cardBox!.x + cardBox!.width - 20, cardBox!.y + cardBox!.height - 20);
+  await page.waitForTimeout(500);
+  await expect(pillBtn).toHaveCount(0);
+
+  // 2. A transparent TAP OVERLAY above a page-sized image must still summon
+  //    the pill (the indirect mapping we do not want to lose).
+  await page.locator("#tapzone").hover();
+  await expect(pillBtn).toBeVisible({ timeout: 3000 });
+
+  // 3. Moving onto unrelated chrome must hide the indirectly-mapped pill —
+  //    no mouseout ever fires from the mapped image itself.
+  await page.locator("#chrome").hover();
+  await expect(pillBtn).toHaveCount(0, { timeout: 4000 });
+});

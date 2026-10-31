@@ -212,11 +212,6 @@ export class PororoOcrEngine implements OcrEngine {
       langGroup?: string;
     },
   ): Promise<SingleOcrResult[]> {
-    await this.ensureModels();
-    if (!this.session || !this.vocab) {
-      throw new Error("Pororo OCR uninitialized");
-    }
-
     const requestedMin = options?.minConfidence ?? PORORO_DEFAULT_MIN;
     // Fix: cap the shared threshold to product-scale range.
     const minConfidence = Math.min(requestedMin, PORORO_MIN_CAP);
@@ -234,6 +229,11 @@ export class PororoOcrEngine implements OcrEngine {
       .flat();
 
     const result = await this.runExclusive(async () => {
+      await this.ensureModels();
+      if (!this.session || !this.vocab) {
+        throw new Error("Pororo OCR uninitialized");
+      }
+
       return await this.runBatches(
         crops,
         batchSize,
