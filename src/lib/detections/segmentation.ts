@@ -29,6 +29,40 @@ export function clearSegmentation(): void {
   currentSegMap = null;
 }
 
+export interface SegmentationTile {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Composite a tile-local segmentation mask into the page mask using max().
+ * Overlapping tiles are both valid observations of the same pixels; max keeps
+ * a text hit from either tile instead of averaging it below the mask threshold.
+ */
+export function mergeSegmentationTile(
+  page: Uint8Array,
+  pageWidth: number,
+  pageHeight: number,
+  tile: SegmentationTile,
+  tileData: Uint8Array,
+): void {
+  const x0 = Math.max(0, tile.x);
+  const y0 = Math.max(0, tile.y);
+  const x1 = Math.min(pageWidth, tile.x + tile.w);
+  const y1 = Math.min(pageHeight, tile.y + tile.h);
+
+  for (let y = y0; y < y1; y++) {
+    const tileRow = (y - tile.y) * tile.w;
+    const pageRow = y * pageWidth;
+    for (let x = x0; x < x1; x++) {
+      const value = tileData[tileRow + (x - tile.x)];
+      if (value > page[pageRow + x]) page[pageRow + x] = value;
+    }
+  }
+}
+
 /**
  * Bilinear resize from letterboxed model segmentation tensor back to original page coordinates.
  */
