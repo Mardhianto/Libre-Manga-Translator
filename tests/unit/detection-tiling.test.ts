@@ -7,6 +7,7 @@ import {
   boxContainment,
   mergeTiledBoxes,
 } from "../../src/lib/detections/tiling";
+import { mergeSegmentationTile } from "../../src/lib/detections/segmentation";
 
 describe("detection tiling policy & geometry", () => {
   describe("shouldTile threshold", () => {
@@ -202,5 +203,54 @@ describe("detection tiling policy & geometry", () => {
       const single: Bbox = { x1: 10, y1: 10, x2: 50, y2: 50, confidence: 0.8 };
       expect(mergeTiledBoxes([single])).toEqual([single]);
     });
+  });
+});
+
+describe("tiled segmentation compositing", () => {
+  it("stamps tile masks into page space and keeps the strongest hit", () => {
+    const page = new Uint8Array(4 * 4);
+    mergeSegmentationTile(
+      page,
+      4,
+      4,
+      { x: 0, y: 0, w: 2, h: 2 },
+      new Uint8Array([10, 20, 30, 40]),
+    );
+
+    expect(Array.from(page)).toEqual([
+      10, 20, 0, 0,
+      30, 40, 0, 0,
+      0, 0, 0, 0,
+      0, 0, 0, 0,
+    ]);
+
+    // Overlaps the first tile at (1,1)-(2,2); max keeps the stronger value.
+    mergeSegmentationTile(
+      page,
+      4,
+      4,
+      { x: 1, y: 1, w: 2, h: 2 },
+      new Uint8Array([200, 5, 250, 0]),
+    );
+
+    expect(Array.from(page)).toEqual([
+      10, 20, 0, 0,
+      30, 200, 5, 0,
+      0, 250, 0, 0,
+      0, 0, 0, 0,
+    ]);
+  });
+
+  it("clamps a tile that extends past the page edge", () => {
+    const page = new Uint8Array(2 * 2);
+    mergeSegmentationTile(
+      page,
+      2,
+      2,
+      { x: 1, y: 1, w: 2, h: 2 },
+      new Uint8Array([9, 9, 9, 9]),
+    );
+
+    expect(Array.from(page)).toEqual([0, 0, 0, 9]);
   });
 });

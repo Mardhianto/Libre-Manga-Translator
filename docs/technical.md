@@ -144,7 +144,7 @@ Two selectable detectors. Switch in **Vision › Detection › Model Selection**
 | Model | Size | License | Notes |
 |---|---|---|---|
 | Comic Bubble Detector (RT-DETR-v2, default) | 11.1 MB | Apache-2.0 | `ogkalu/comic-text-and-bubble-detector`. Detects `bubble`, `text_bubble`, `text_free`. Good at bubbles and free-floating text. |
-| Comic Text Detector & Segmentation | 94.7 MB | GPL-3.0 | `comictextdetector.pt.onnx` (dmMaze via manga-image-translator beta-0.3). Returns text boxes plus a per-pixel segmentation mask (`[1, 1, 1024, 1024]`) upsampled to page resolution; `buildSegmentationSeed` seeds `fitMask()` directly from the mask, falling back to `buildInkSeed` when absent. |
+| Comic Text Detector & Segmentation | 94.7 MB | GPL-3.0 | `comictextdetector.pt.onnx` (dmMaze via manga-image-translator beta-0.3). Returns text boxes plus a per-pixel segmentation mask (`[1, 1, 1024, 1024]`) upsampled to page resolution; `buildSegmentationSeed` seeds `fitMask()` directly from the mask, falling back to `buildInkSeed` when absent. Tiles tall/oversized pages with the shared sliding-window policy; tile masks composite into one page mask with per-pixel max. |
 
 Unknown model ids throw `UNKNOWN_DETECTION_MODEL_MESSAGE` with setup-wizard directions.
 

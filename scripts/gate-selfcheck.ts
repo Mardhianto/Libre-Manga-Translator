@@ -186,6 +186,7 @@ check("mode: cjk source", gateModeFor("Japanese", true, false) === "cjk");
 check("mode: force turns off", gateModeFor("Japanese", true, true) === "off");
 check("mode: auto", gateModeFor("Auto-Detect", true, false) === "auto");
 check("mode: auto-detect stays auto when gate disabled", gateModeFor("Auto-Detect", false, false) === "auto");
+check("mode: force off beats auto-detect", gateModeFor("Auto-Detect", false, true) === "off");
 check("mode: disabled gate is off for explicit source", gateModeFor("Japanese", false, false) === "off");
 check("mode: other", gateModeFor("Russian", true, false) === "other");
 check("mode: Korean is other mode", gateModeFor("Korean", true, false) === "other");

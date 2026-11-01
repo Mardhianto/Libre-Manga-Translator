@@ -70,8 +70,12 @@ describe("detector preprocessing contracts", () => {
     expect(rtdetr).not.toMatch(/0\.485|0\.229/);
   });
 
-  it("ComicTextDetector keeps the same letterbox and inverse transform", () => {
+  it("ComicTextDetector keeps the same letterbox and tiles tall pages", () => {
     expect(comictext).toMatch(/scalingImage\(/);
     expect(comictext).toMatch(/restoreBoundingBox\(/);
+    expect(comictext).toMatch(/shouldTile\(/);
+    expect(comictext).toMatch(/planDetectionTiles\(/);
+    expect(comictext).toMatch(/mergeTiledBoxes\(/);
+    expect(comictext).toMatch(/mergeSegmentationTile\(/);
   });
 });
