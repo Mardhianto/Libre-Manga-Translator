@@ -11,7 +11,7 @@
   import { DefaultConfig } from "@/lib/configs";
   import { createLlmEngine } from "@/lib/llm-engine";
   import type { MLCEngine } from "@mlc-ai/web-llm";
-  import { isAbortError } from "@/lib/utils";
+  import { isAbortError, probeLlmsCached } from "@/lib/utils";
 
   let {
     selectedLlmModel = $bindable(DefaultConfig.llmModels[0].id),
@@ -29,9 +29,56 @@
   let llmDone = $state(false);
   let llmError = $state<string | null>(null);
   let llmEngine: MLCEngine | null = null;
+  let cachedLlms = $state<string[]>([]);
+  
+  // Variable to track if we've checked cleaning (for effect dependency)
+  let isCleaning = $state(false);
+
+  // Check which models are actually cached
+  async function checkCacheStatus() {
+    try {
+      const modelIds = DefaultConfig.llmModels.map((m) => m.id);
+      const verified = await probeLlmsCached(modelIds);
+      cachedLlms = verified;
+      // If current selection is cached but not showing as done, mark it as done
+      if (cachedLlms.includes(selectedLlmModel) && !llmDone) {
+        llmDone = true;
+        llmError = null;
+      }
+    } catch {
+      // Probe unavailable, keep existing cache state
+    }
+  }
+
+  // Watch for model selection changes and update UI accordingly
+  $effect(() => {
+    if (!llmDownloading && !isCleaning) {
+      // When model selection changes, check if it's cached
+      if (cachedLlms.includes(selectedLlmModel)) {
+        llmDone = true;
+        llmError = null;
+      } else {
+        llmDone = false;
+        llmError = null;
+      }
+    }
+  });
+  
+  // Check cache status on mount
+  onMount(() => {
+    void checkCacheStatus();
+  });
 
   async function startLlmDownload() {
     if (llmDownloading) return;
+    
+    // If already cached, just mark as done and show success
+    if (cachedLlms.includes(selectedLlmModel)) {
+      llmDone = true;
+      llmError = null;
+      return;
+    }
+    
     llmDownloading = true;
     llmDone = false;
     llmError = null;
@@ -46,6 +93,7 @@
       });
       await llmEngine.reload(selectedLlmModel);
       llmDone = true;
+      
       const items = await storage.getItems(["local:cached-llms"]);
       const cached = (items[0].value as string[]) || [];
       await storage.setItems([
@@ -54,6 +102,11 @@
           : []),
         { key: "sync:llm-model" as const, value: selectedLlmModel },
       ]);
+      
+      // Update local cache state immediately
+      if (!cached.includes(selectedLlmModel)) {
+        cachedLlms = [...cached, selectedLlmModel];
+      }
     } catch (err: any) {
       // Stop (engine.unload aborts reload) is user intent — not a failure.
       if (isAbortError(err)) {

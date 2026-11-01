@@ -1,8 +1,14 @@
 <script lang="ts">
   import { DefaultConfig } from "@/lib/configs";
   import { openSetupTab, probeLlmsCached } from "@/lib/utils";
-  import { onMount } from "svelte";
+  import {
+    getManagedDownloads,
+    onManagedDownloadProgress,
+    type ManagedDownloadSnapshot,
+  } from "@/lib/download-client";
+  import { onMount, onDestroy } from "svelte";
   import ModelSelect from "@/lib/components/ui/ModelSelect.svelte";
+  import type { RowDownloadState } from "@/lib/components/ui/ModelSelect.svelte";
   import {
     Eye,
     EyeOff,
@@ -39,6 +45,10 @@
   let showKey = $state(false);
   let showServerKey = $state(false);
   let serverTesting = $state(false);
+  let loadingId: string | null = $state(null);
+  let progress: Record<string, number> = $state({});
+  let dlById: Record<string, RowDownloadState> = $state({});
+  let unsubProgress: (() => void) | null = null;
   let serverTestResult = $state<{
     success: boolean;
     models?: string[];
@@ -65,8 +75,74 @@
     }
   }
 
+  function rowIdForKey(key: string): string | null {
+    // WebLLM downloads use model IDs directly (e.g., "llama-3.2-1b")
+    // Check if key matches any known model ID
+    const modelIds = DefaultConfig.llmModels.map(m => m.id);
+    return modelIds.includes(key) ? key : null;
+  }
+
+  /** Fold one manager snapshot into the single-button row state. */
+  function applySnapshot(snap: any) {
+    // Handle both ManagedDownloadSnapshot and WebLLM progress messages
+    const key = snap.key ?? snap.modelId;
+    const status = snap.status;
+    const fraction = snap.fraction ?? (snap.progress ?? 0);
+    
+    if (!key || !status) return;
+    
+    const rowId = rowIdForKey(key);
+    if (!rowId) return;
+    
+    if (status === "downloading" || status === "paused" || status === "error") {
+      dlById = { ...dlById, [rowId]: { status: status as any, progress: fraction } };
+      loadingId = rowId;
+      progress = { ...progress, [rowId]: fraction };
+    } else if (status === "done" || status === "ready" || status === "idle") {
+      const { [rowId]: _dropped, ...rest } = dlById;
+      dlById = rest;
+      if (loadingId === rowId) {
+        loadingId = null;
+        const { [rowId]: _p, ...prest } = progress;
+        progress = prest;
+      }
+      if (status === "done" || status === "ready") void refreshLlmCacheStatus();
+    }
+  }
+
+  async function refreshManaged() {
+    const all = await getManagedDownloads();
+    for (const snap of Object.values(all)) applySnapshot(snap);
+    const live = new Set(
+      Object.values(all)
+        .filter((s) => s.status === "downloading" || s.status === "paused" || s.status === "error")
+        .map((s) => rowIdForKey(s.key))
+        .filter((v): v is string => v !== null),
+    );
+    dlById = Object.fromEntries(Object.entries(dlById).filter(([id]) => live.has(id)));
+    if (loadingId && !live.has(loadingId)) {
+      loadingId = null;
+      progress = {};
+    }
+  }
+
+  $effect(() => {
+    // When llmModel changes, refresh cache status for the current model
+    // Use a timeout to debounce rapid changes
+    const timer = setTimeout(() => {
+      refreshLlmCacheStatus();
+    }, 100);
+    return () => clearTimeout(timer);
+  });
+
   onMount(() => {
     refreshLlmCacheStatus();
+    refreshManaged();
+    unsubProgress = onManagedDownloadProgress(applySnapshot);
+  });
+
+  onDestroy(() => {
+    unsubProgress?.();
   });
 
   async function testServer() {
@@ -123,7 +199,17 @@
           bind:value={llmModel}
           options={DefaultConfig.llmModels.map((m) => ({ id: m.id, label: m.label, size: m.vram, desc: m.desc }))}
           cached={Object.fromEntries(cachedLlms.map((id) => [id, true]))}
+          {loadingId}
+          {progress}
+          downloadState={dlById}
           onDownload={(id) => openSetupTab(id)}
+          onToggleDownload={(id) => {
+            // Handle WebLLM download pause/resume if needed
+            console.log("WebLLM download toggle for:", id);
+            // Currently WebLLM downloads handled in setup wizard
+            // Redirect to setup wizard for download management
+            openSetupTab(id);
+          }}
         />
       </div>
 

@@ -11,7 +11,7 @@
   import { DefaultConfig } from "@/lib/configs";
   import { createLlmEngine } from "@/lib/llm-engine";
   import { MLCEngine, deleteModelAllInfoInCache } from "@mlc-ai/web-llm";
-  import { isAbortError } from "@/lib/utils";
+  import { isAbortError, probeLlmsCached } from "@/lib/utils";
 
   let selectedLlmModel = $state(DefaultConfig.llmModels[0].id);
   let llmDownloading = $state(false);
@@ -23,16 +23,51 @@
   let llmCleaned = $state(false);
   let llmCleanError = $state<string | null>(null);
   let llmEngine: MLCEngine | null = null;
+  let cachedLlms = $state<string[]>([]);
 
-  onMount(() => {
+  // Check which models are actually cached
+  async function checkCacheStatus() {
+    try {
+      const modelIds = DefaultConfig.llmModels.map((m) => m.id);
+      const verified = await probeLlmsCached(modelIds);
+      cachedLlms = verified;
+      // If current selection is cached but not showing as done, mark it as done
+      if (cachedLlms.includes(selectedLlmModel) && !llmDone) {
+        llmDone = true;
+        llmError = null;
+      }
+    } catch {
+      // Probe unavailable, keep existing cache state
+    }
+  }
+
+  onMount(async () => {
     const params = new URLSearchParams(window.location.search);
     const modelParam = params.get("model");
     if (modelParam) {
       const found = DefaultConfig.llmModels.find((m) => m.id === modelParam);
       if (found) selectedLlmModel = found.id;
       else selectedLlmModel = modelParam;
-      if (params.get("clean") === "1") {
-        cleanLlmModel();
+    }
+    
+    // Check cache status
+    await checkCacheStatus();
+    
+    if (params.get("clean") === "1") {
+      cleanLlmModel();
+    }
+  });
+
+  // Watch for model selection changes and update UI accordingly
+  $effect(() => {
+    if (!llmDownloading && !llmCleaning) {
+      // When model selection changes, check if it's cached
+      if (cachedLlms.includes(selectedLlmModel)) {
+        llmDone = true;
+        llmError = null;
+      } else {
+        llmDone = false;
+        llmError = null;
       }
     }
   });
@@ -50,6 +85,8 @@
         "local:cached-llms",
         cached.filter((m) => m !== selectedLlmModel),
       );
+      // Update local cache state immediately
+      cachedLlms = cached.filter((m) => m !== selectedLlmModel);
       llmCleaned = true;
     } catch (err: any) {
       llmCleanError = err?.message ?? "Failed to clear cached model.";
@@ -60,6 +97,14 @@
 
   async function startLlmDownload() {
     if (llmDownloading) return;
+    
+    // If already cached, just mark as done and show success
+    if (cachedLlms.includes(selectedLlmModel)) {
+      llmDone = true;
+      llmError = null;
+      return;
+    }
+    
     llmDownloading = true;
     llmDone = false;
     llmError = null;
@@ -74,6 +119,7 @@
       });
       await llmEngine.reload(selectedLlmModel);
       llmDone = true;
+      
       const items = await storage.getItems(["local:cached-llms"]);
       const cached = (items[0].value as string[]) || [];
       await storage.setItems([
@@ -82,6 +128,11 @@
           : []),
         { key: "sync:llm-model" as const, value: selectedLlmModel },
       ]);
+      
+      // Update local cache state immediately
+      if (!cached.includes(selectedLlmModel)) {
+        cachedLlms = [...cached, selectedLlmModel];
+      }
     } catch (err: any) {
       // Stop (engine.unload aborts reload) is user intent — not a failure.
       if (isAbortError(err)) {
