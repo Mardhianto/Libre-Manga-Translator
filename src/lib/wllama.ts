@@ -98,8 +98,8 @@ async function ensureWllama(
   }
 
   onStage?.("Loading weights into memory — first run takes minutes…");
-  // ponytail: n_ctx 2048 keeps 4B GGUF KV cache within 32-bit wasm memory limits; raise if translation prompts exceed 1500 tokens
-  const params = { n_ctx: 2048 };
+  // ponytail: n_ctx 4096 keeps 4B GGUF KV cache within 32-bit wasm memory limits; raise if translation prompts exceed 1500 tokens
+  const params = { n_ctx: 4096 };
   const load = (async () => {
     try {
       await instance.loadModel([blob], { ...params, n_gpu_layers: 999999 });

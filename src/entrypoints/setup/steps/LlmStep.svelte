@@ -88,14 +88,6 @@
 
   async function startLlmDownload() {
     if (llmDownloading) return;
-    
-    // If already cached, just mark as done and show success
-    if (cachedLlms.includes(selectedLlmModel)) {
-      llmDone = true;
-      llmError = null;
-      return;
-    }
-    
     llmDownloading = true;
     llmPaused = false;
     llmDone = false;
@@ -135,7 +127,6 @@
         await llmEngine.reload(selectedLlmModel);
       }
       llmDone = true;
-      
       const items = await storage.getItems(["local:cached-llms"]);
       const cached = (items[0]?.value as string[]) || [];
       if (!cached.includes(selectedLlmModel)) {
