@@ -29,6 +29,11 @@ import { onDestroy } from "svelte";
   import ModelUpdateChecker from "./settings/ModelUpdateChecker.svelte";
   import GpuAccelerationPanel from "./settings/GpuAccelerationPanel.svelte";
   import { getSiteRule } from "@/lib/adapters";
+  import {
+    loadSeriesContext,
+    resetSeriesContext,
+    saveSeriesContextSettings,
+  } from "@/lib/series-context-store";
 
   let isOpen = $state(false);
   let activeSection = $state<string>("pipeline");
@@ -176,7 +181,6 @@ import { onDestroy } from "svelte";
         "sync:current-mode",
         "sync:source-lang",
         "sync:target-lang",
-        `sync:context-${seriesName}`,
         "sync:text-font",
         "local:custom-fonts",
         "sync:llm-model",
@@ -226,8 +230,11 @@ import { onDestroy } from "svelte";
       scriptGate = saved["sync:script-gate"] ?? scriptGate;
       cachedLlms = Array.isArray(saved["local:cached-llms"]) ? saved["local:cached-llms"] : [];
 
-      const storedCtx = saved[`sync:context-${seriesName}`];
-      if (storedCtx) seriesContext = { ...seriesContext, ...storedCtx };
+      const storedCtx = await loadSeriesContext(seriesName);
+      // The store returns the composed context (settings + history); the UI
+      // only ever edits the settings fields, so history is carried through
+      // untouched and never re-saved from here.
+      seriesContext = storedCtx;
     } finally {
       loadingSettings = false;
     }
@@ -235,7 +242,16 @@ import { onDestroy } from "svelte";
 
   function saveNow() {
     clearTimeout(saveTimer);
-    storage.setItems([
+    // Series context is saved separately (saveSeriesContextSettings) so a
+    // stale editor can never clobber page-accumulated history.
+    saveSeriesContextSettings(seriesName, {
+      summary: seriesContext.summary,
+      dictionary: seriesContext.dictionary,
+      seriesName: seriesContext.seriesName,
+    }).catch((err) => console.warn("LMT: series-context save failed:", err));
+
+    storage
+      .setItems([
       { key: "sync:detection-min-confidence", value: detectionMinConfidence },
       { key: "sync:skip-bbox-refining", value: skipBboxRefining },
       { key: "sync:auto-translate", value: autoTranslate },
@@ -247,7 +263,6 @@ import { onDestroy } from "svelte";
       { key: "sync:target-lang", value: targetLang },
       { key: "sync:detection-model", value: detectionModel },
       { key: "sync:current-mode", value: currentMode },
-      { key: `sync:context-${seriesName}`, value: $state.snapshot(seriesContext) },
       { key: "sync:text-font", value: textFont },
       { key: "local:custom-fonts", value: $state.snapshot(customFonts) },
       { key: "sync:llm-model", value: llmModel },
@@ -262,7 +277,7 @@ import { onDestroy } from "svelte";
       { key: "sync:always-inpaint", value: alwaysInpaint },
       { key: "sync:ocr-engine", value: ocrEngine },
       { key: "sync:script-gate", value: scriptGate },
-    ]);
+    ]).catch((err) => console.warn("LMT: settings save failed:", err));
   }
 
   function debouncedSave() {
@@ -270,6 +285,31 @@ import { onDestroy } from "svelte";
     saveTimer = setTimeout(() => {
       saveNow();
     }, 150);
+  }
+
+  async function handleResetSeriesContext() {
+    if (
+      !confirm(
+        `Reset series context for "${seriesContext.seriesName || seriesName}"?\n\nThis clears the summary, glossary, and recent page history used for translation continuity. Cached pages are kept.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await resetSeriesContext(seriesName);
+      seriesContext = {
+        ...seriesContext,
+        seriesName,
+        summary: "",
+        dictionary: "",
+        lastChapterId: null,
+        lastPageIndex: null,
+        recentHistory: [],
+        translatedCount: 0,
+      };
+    } catch (err) {
+      console.warn("LMT: series-context reset failed:", err);
+    }
   }
 
   onDestroy(() => {
@@ -643,6 +683,14 @@ import { onDestroy } from "svelte";
                   rows={2}
                   class="w-full bg-[var(--bg-void)] custom-scrollbar border border-[var(--border-faint)] rounded-lg p-2 text-xs outline-none resize-none focus:border-[var(--border-line)] placeholder:text-[var(--text-dim)]"
                 ></textarea>
+                <button
+                  type="button"
+                  onclick={handleResetSeriesContext}
+                  class="self-start text-[10px] uppercase tracking-wide text-[var(--text-dim)] hover:text-[var(--accent-rose)] cursor-pointer transition-colors"
+                  title="Clear summary, glossary, and page history for this series"
+                >
+                  Reset series context
+                </button>
               </div>
             </div>
           </div>

@@ -16,6 +16,11 @@
   import { openSetupTab, probeArtifactsCached } from "@/lib/utils";
   import { getManagedDownloads } from "@/lib/download-client";
   import { getSiteRule } from "@/lib/adapters";
+  import {
+    loadSeriesContext,
+    resetSeriesContext,
+    saveSeriesContextSettings,
+  } from "@/lib/series-context-store";
   import DetectionSettings from "@/lib/components/settings/DetectionSettings.svelte";
   import OcrSettings from "@/lib/components/settings/OcrSettings.svelte";
   import BackendSettings from "@/lib/components/settings/BackendSettings.svelte";
@@ -147,7 +152,6 @@
           "sync:current-mode",
           "sync:source-lang",
           "sync:target-lang",
-          `sync:context-${seriesName}`,
           "sync:text-font",
           "local:custom-fonts",
           "local:cached-llms",
@@ -198,8 +202,7 @@
       inpaintMethod = normalizeInpaintMethod(saved["sync:inpaint-method"] ?? inpaintMethod);
       alwaysInpaint = saved["sync:always-inpaint"] ?? alwaysInpaint;
 
-      const storedCtx = saved[`sync:context-${seriesName}`];
-      if (storedCtx) seriesContext = { ...seriesContext, ...storedCtx };
+      seriesContext = await loadSeriesContext(seriesName);
     } finally {
       clearTimeout(hardTimer);
       loadingSettings = false;
@@ -208,7 +211,16 @@
 
   function saveNow() {
     clearTimeout(saveTimer);
-    storage.setItems([
+    // Series context is saved through the store so a stale popup cannot
+    // overwrite the history the content script accumulates per page.
+    saveSeriesContextSettings(seriesName, {
+      summary: seriesContext.summary,
+      dictionary: seriesContext.dictionary,
+      seriesName: seriesContext.seriesName,
+    }).catch((err) => console.warn("LMT: series-context save failed:", err));
+
+    storage
+      .setItems([
       { key: "sync:detection-min-confidence", value: detectionMinConfidence },
       { key: "sync:skip-bbox-refining", value: skipBboxRefining },
       { key: "sync:auto-translate", value: autoTranslate },
@@ -221,7 +233,6 @@
       { key: "sync:target-lang", value: targetLang },
       { key: "sync:detection-model", value: detectionModel },
       { key: "sync:current-mode", value: currentMode },
-      { key: `sync:context-${seriesName}`, value: $state.snapshot(seriesContext) },
       { key: "sync:text-font", value: textFont },
       { key: "local:custom-fonts", value: $state.snapshot(customFonts) },
       { key: "sync:llm-model", value: llmModel },
@@ -235,7 +246,32 @@
       { key: "sync:inpaint-method", value: inpaintMethod },
       { key: "sync:always-inpaint", value: alwaysInpaint },
       { key: "sync:ocr-engine", value: ocrEngine },
-    ]);
+    ]).catch((err) => console.warn("LMT: settings save failed:", err));
+  }
+
+  async function handleResetSeriesContext() {
+    if (
+      !confirm(
+        `Reset series context for "${seriesContext.seriesName || seriesName}"?\n\nThis clears the summary, glossary, and recent page history used for translation continuity. Cached pages are kept.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await resetSeriesContext(seriesName);
+      seriesContext = {
+        ...seriesContext,
+        seriesName,
+        summary: "",
+        dictionary: "",
+        lastChapterId: null,
+        lastPageIndex: null,
+        recentHistory: [],
+        translatedCount: 0,
+      };
+    } catch (err) {
+      console.warn("LMT: series-context reset failed:", err);
+    }
   }
 
   function debouncedSave() {
@@ -670,6 +706,14 @@
               rows={2}
               class="w-full bg-[var(--bg-void)] border border-[var(--border-faint)] rounded-lg p-1.5 text-xs outline-none resize-none focus:border-[var(--border-line)] placeholder:text-[var(--text-dim)]"
             ></textarea>
+            <button
+              type="button"
+              onclick={handleResetSeriesContext}
+              class="self-start text-[10px] uppercase tracking-wide text-[var(--text-dim)] hover:text-[var(--accent-rose)] cursor-pointer transition-colors"
+              title="Clear summary, glossary, and page history for this series"
+            >
+              Reset series context
+            </button>
           </div>
         {/if}
       </section>

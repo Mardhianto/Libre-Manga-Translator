@@ -4,7 +4,7 @@ import FloatingTrigger from "@/lib/components/FloatingTrigger.svelte";
 import { AutoTranslateOrchestrator } from "./auto-translate";
 import * as Registry from "./translation-registry";
 import { mount, unmount } from "svelte";
-import { ShadowRootContentScriptUi } from "#imports";
+import { ShadowRootContentScriptUi, storage } from "#imports";
 import { getSiteRule, resolveActiveSiteRule } from "@/lib/adapters";
 import { DefaultConfig, normalizeDetectionModel, resolveLangGroup } from "@/lib/configs";
 import { logDebugEntry, updateDebugEntry } from "./debug";
@@ -12,7 +12,6 @@ import {
   createImageObservers,
   imageToBase64,
   repaintWithTranslations,
-  updateSeriesContext,
   inpaintImage,
   drawTranslations,
   exportCanvasToJpeg,
@@ -24,6 +23,15 @@ import {
 } from "./utils";
 import { getElementSrc } from "@/lib/canvas";
 import { maskUntranslated } from "@/lib/server/validator";
+import {
+  isCleanResult,
+  seriesContextFromStored,
+} from "@/lib/series-context";
+import {
+  localHistoryKey,
+  syncContextKey,
+  updateSeriesContext,
+} from "@/lib/series-context-store";
 import "@/assets/app.css";
 
 const srcKey = (src: string) =>
@@ -392,7 +400,8 @@ export default defineContentScript({
                   // and serialize behind popup reads. Reading them in bulk
                   // removes 13 sequential async hops from the hot path.
                   const cfgItems = await storage.getItems([
-                    `sync:context-${seriesName}`,
+                    syncContextKey(seriesName),
+                    localHistoryKey(seriesName),
                     "sync:current-mode",
                     "sync:source-lang",
                     "sync:target-lang",
@@ -410,22 +419,19 @@ export default defineContentScript({
                     cfgItems.map((i) => [i.key, i.value]),
                   );
 
-                  let seriesContext = cfg[`sync:context-${seriesName}`] as
-                    | SeriesContext
-                    | undefined;
+                  const seriesContext = seriesContextFromStored(
+                    cfg[syncContextKey(seriesName)],
+                    cfg[localHistoryKey(seriesName)],
+                    seriesName,
+                  );
 
-                  // Perform the continuity check
-                  if (seriesContext) {
-                    const isContinuous =
-                      seriesContext.lastChapterId === chapterId &&
-                      seriesContext.lastPageIndex !== null &&
-                      resolvedPage === seriesContext.lastPageIndex + 1;
-
-                    // If they jumped chapters or skipped pages, wipe the history in memory
-                    if (!isContinuous) {
-                      seriesContext.recentHistory = [];
-                    }
-                  }
+                  // Continuity is computed here, outside the update path, so a
+                  // dirty page (which must not append history) still advances
+                  // the stored position instead of forcing a reset next time.
+                  const isContinuous =
+                    seriesContext.lastChapterId === chapterId &&
+                    seriesContext.lastPageIndex !== null &&
+                    resolvedPage === seriesContext.lastPageIndex + 1;
 
                   const curMode =
                     (cfg["sync:current-mode"] as string | undefined) ??
@@ -567,33 +573,32 @@ export default defineContentScript({
                   const backend = resp?.backend;
 
                   if (!opts?.transient) {
-
                     // Fire-and-forget: success debug log, page cache, and series
                     // context updates. None of these need to block the popup.
                     const successEntryPromise = logDebugEntry({
-                    id: crypto.randomUUID(),
-                    timestamp: Date.now(),
-                    success: true,
-                    mode: curMode,
-                    version: debugCtx.version,
-                    device: debugCtx.device,
-                    backend: curMode === "webgpu" ? backend : undefined,
-                    gate: gate
-                      ? {
-                          mode: gate.mode,
-                          checked: gate.checked,
-                          skipped: gate.skipped,
-                          group: gate.group,
-                          unavailable: gate.unavailable,
-                        }
-                      : undefined,
-                    sourceLang: srcLang,
-                    targetLang: tgtLang,
-                    langGroup: debugCtx.langGroup,
-                    bboxCount: bboxes.length,
-                    sourceTexts,
-                    translations,
-                    untranslated: diagnostics?.untranslated,
+                      id: crypto.randomUUID(),
+                      timestamp: Date.now(),
+                      success: true,
+                      mode: curMode,
+                      version: debugCtx.version,
+                      device: debugCtx.device,
+                      backend: curMode === "webgpu" ? backend : undefined,
+                      gate: gate
+                        ? {
+                            mode: gate.mode,
+                            checked: gate.checked,
+                            skipped: gate.skipped,
+                            group: gate.group,
+                            unavailable: gate.unavailable,
+                          }
+                        : undefined,
+                      sourceLang: srcLang,
+                      targetLang: tgtLang,
+                      langGroup: debugCtx.langGroup,
+                      bboxCount: bboxes.length,
+                      sourceTexts,
+                      translations,
+                      untranslated: diagnostics?.untranslated,
                     timing,
                     ocrMinConfidence: debugCtx.ocrMinConfidence,
                     detectionMinConfidence: debugCtx.detectionMinConfidence,
@@ -613,27 +618,39 @@ export default defineContentScript({
                     })
                     .catch((err) => console.warn("LMT: debug-log write failed:", err));
 
-                  const cacheKey = await translationKey();
-                  storage
-                    .setItem<PageCache>(`local:${cacheKey}`, {
-                      bboxes,
-                      // Persist the paintable set so a cache hit cannot
-                      // resurrect an echoed source line.
-                      translations: visibleTranslations,
-                      sourceTexts,
-                    })
-                    .catch((err) => console.warn("LMT: page-cache persist failed:", err));
+                  // LMT-026: only a fully translated page may write cache or
+                  // context. A padded/echoed page keeps its debug entry (that
+                  // is the whole point of the log) but must not poison the
+                  // next prompt or resurrect echoed lines from cache.
+                  if (isCleanResult(diagnostics)) {
+                    const cacheKey = await translationKey();
+                    storage
+                      .setItem<PageCache>(`local:${cacheKey}`, {
+                        bboxes,
+                        // Persist the paintable set so a cache hit cannot
+                        // resurrect an echoed source line.
+                        translations: visibleTranslations,
+                        sourceTexts,
+                      })
+                      .catch((err) => console.warn("LMT: page-cache persist failed:", err));
 
-                  updateSeriesContext(
-                    seriesContext ?? null,
-                    seriesName,
-                    chapterId,
-                    resolvedPage,
-                    // Never feed an echoed source line into the next prompt.
-                    visibleTranslations,
-                    context,
-                  ).catch((err) => console.warn("LMT: series-context update failed:", err));
-                }
+                    updateSeriesContext(
+                      seriesName,
+                      chapterId,
+                      resolvedPage,
+                      // Never feed an echoed source line into the next prompt.
+                      visibleTranslations,
+                      context,
+                      { resetHistory: !isContinuous, diagnostics },
+                    ).catch((err) => console.warn("LMT: series-context update failed:", err));
+                  } else {
+                    console.warn(
+                      `LMT: ${diagnostics?.untranslated?.length ?? 0} untranslated box(es) on ${
+                        seriesName ? `"${seriesName}" ` : ""
+                      }page ${resolvedPage}; cache/context not saved.`,
+                    );
+                  }
+                  }
 
                   return { translations: visibleTranslations, sourceTexts, context, gateSkip, gate, diagnostics };
                 },
