@@ -13,9 +13,14 @@
  *
  *   bun scripts/lmt-mock-server.ts            # listens on :8033
  *   LMT_MOCK_PORT=9100 bun scripts/lmt-mock-server.ts
+ *   LMT_MOCK_REJECT_SCHEMA=1 bun scripts/lmt-mock-server.ts
+ *     Rejects the first `response_format: json_schema` request with HTTP 400,
+ *     then accepts the json_object retry — exercises the fallback.
  */
 const PORT = Number(process.env.LMT_MOCK_PORT ?? 8033);
 const MODEL_ID = process.env.LMT_MOCK_MODEL ?? "tiny-aya-fire-q4_k_m";
+const REJECT_SCHEMA_ONCE = process.env.LMT_MOCK_REJECT_SCHEMA === "1";
+let rejectedSchema = false;
 
 // `buildTranslationPrompts` renders one line per box:
 //   Box 3: "こんにちは"        Box 5: "" (empty — return "")
@@ -81,6 +86,18 @@ const server = Bun.serve({
 
     if (url.pathname.endsWith("/chat/completions") && req.method === "POST") {
       const body = await req.json().catch(() => null);
+      if (
+        REJECT_SCHEMA_ONCE &&
+        !rejectedSchema &&
+        body?.response_format?.type === "json_schema"
+      ) {
+        rejectedSchema = true;
+        console.log("[lmt-mock] rejecting json_schema once (fallback test)");
+        return Response.json(
+          { error: { message: "lmt-mock: json_schema is not supported" } },
+          { status: 400 },
+        );
+      }
       return complete(body);
     }
 

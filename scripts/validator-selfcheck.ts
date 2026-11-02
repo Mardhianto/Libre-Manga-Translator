@@ -1,4 +1,9 @@
-import { parseLlmJson, validateTranslationResult } from "../src/lib/server/validator";
+import {
+  TranslationValidationError,
+  maskUntranslated,
+  parseLlmJson,
+  validateTranslationResult,
+} from "../src/lib/server/validator";
 
 function assert(condition: boolean, msg: string) {
   if (!condition) {
@@ -19,36 +24,52 @@ const valid = validateTranslationResult(
 assert(valid.translations.length === 2, "translations length should be 2");
 assert(valid.translations[0] === "Hello", "translation[0] should be Hello");
 assert(valid.context?.summary === "Manga chapter 1", "summary should match");
+assert(valid.diagnostics.clean === true, "genuine translation must be clean");
 
-// Count mismatch: healed by default, so one dropped box (usually an empty OCR
-// box the model merged away) never fails the whole page. `strict` restores the
-// older throw-on-mismatch contract. This script previously asserted the old
-// behaviour as the only contract and had been failing unnoticed ever since.
-const padded = validateTranslationResult({ translations: ["One"] }, 2);
-assert(padded.translations.length === 2, "Short array must be padded to the expected count");
-assert(padded.translations[1] === "", "Padded slots must be empty strings, not undefined");
-
-const truncated = validateTranslationResult({ translations: ["A", "B", "C"] }, 2);
-assert(truncated.translations.length === 2, "Long array must be truncated to the expected count");
-
-let strictThrown = false;
-try {
-  validateTranslationResult({ translations: ["One"] }, 2, { strict: true });
-} catch {
-  strictThrown = true;
-}
-assert(strictThrown, "strict: true must throw on count mismatch");
-
-// Non-string items are coerced, never rejected: output index N must keep
-// mirroring OCR box N, so a numeric or null item still has to yield a string.
-const coerced = validateTranslationResult({ translations: [123, "Two"] }, 2);
-assert(coerced.translations[0] === "123", "Numeric translation must coerce to a string");
-assert(
-  validateTranslationResult({ translations: [null, undefined] }, 2).translations.every(
-    (t) => t === "",
-  ),
-  "null/undefined must coerce to an empty string",
+// Object items and Box N maps are normalized, not stringified.
+const objectItems = validateTranslationResult(
+  {
+    translations: [
+      { box: 1, text: "Hi" },
+      { box: 2, translation: "There" },
+    ],
+  },
+  2,
 );
+assert(
+  objectItems.translations.join("|") === "Hi|There",
+  "object items must unwrap text/translation",
+);
+
+const boxMap = validateTranslationResult({ "Box 1": "A", "Box 2": "B" }, 2);
+assert(boxMap.translations.join("|") === "A|B", "Box N maps must normalize");
+
+// Count mismatch is always a typed error: never pad, never truncate.
+for (const input of [{ translations: ["One"] }, { translations: ["A", "B", "C"] }]) {
+  let mismatch: unknown;
+  try {
+    validateTranslationResult(input, 2);
+  } catch (error) {
+    mismatch = error;
+  }
+  assert(
+    mismatch instanceof TranslationValidationError,
+    "count mismatch must throw TranslationValidationError",
+  );
+  assert(
+    (mismatch as TranslationValidationError).code === "COUNT_MISMATCH",
+    "count mismatch code must be COUNT_MISMATCH",
+  );
+}
+
+// Unknown objects must never be painted.
+let badItemThrown = false;
+try {
+  validateTranslationResult({ translations: [{ key: "val" }] }, 1);
+} catch (error) {
+  badItemThrown = error instanceof TranslationValidationError;
+}
+assert(badItemThrown, "unknown object items must throw, not stringify");
 
 // Non-object should throw
 let nonObjectThrown = false;
@@ -58,6 +79,19 @@ try {
   nonObjectThrown = true;
 }
 assert(nonObjectThrown, "Non-object must throw error");
+
+// Echoed Japanese is flagged and masked.
+const echoed = validateTranslationResult(
+  { translations: ["こんにちは"] },
+  1,
+  { sourceTexts: ["こんにちは"], sourceLang: "Japanese", targetLang: "English" },
+);
+assert(echoed.diagnostics.untranslated[0] === 0, "echoed box must be flagged");
+assert(
+  maskUntranslated(echoed.translations, echoed.diagnostics.untranslated)[0] === "",
+  "maskUntranslated must empty echoed boxes",
+);
+assert(echoed.diagnostics.clean === false, "echoed page must not be clean");
 
 // parseLlmJson: chatty LLM preamble + code fence + trailing explanation
 const chatty = parseLlmJson(

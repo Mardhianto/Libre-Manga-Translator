@@ -3,17 +3,44 @@ import { buildSiteRulePrompts, buildTranslationPrompts } from "../prompts";
 import {
   buildLmStudioTextRequest,
   buildOpenAITextRequest,
-  ServerConfig,
+  type ResponseFormatMode,
+  type ServerConfig,
 } from "./schemas";
-import { parseLlmJson, validateTranslationResult } from "./validator";
+import {
+  isTranslationValidationError,
+  parseLlmJson,
+  validateTranslationResult,
+} from "./validator";
 
 export type { ServerConfig } from "./schemas";
 export { parseLlmJson };
 
-async function callServer(
+interface CallServerOptions {
+  schema?: object;
+  schemaName?: string;
+  /** Reuse the format that already worked instead of retrying a rejected one. */
+  startMode?: ResponseFormatMode;
+  /** Appended to the user prompt for the single correction round-trip. */
+  correction?: string;
+}
+
+interface ServerResponse {
+  data: any;
+  format: ResponseFormatMode;
+}
+
+const FORMAT_CHAINS: Record<ServerConfig["serverSchema"], ResponseFormatMode[]> = {
+  openai: ["json_schema", "json_object"],
+  lmstudio: ["json_schema", "json_object", "none"],
+};
+
+async function requestOnce(
   systemPrompt: string,
   userPrompt: string,
   config: ServerConfig,
+  schema: object | undefined,
+  schemaName: string,
+  mode: ResponseFormatMode,
   retryCount = 0,
 ): Promise<any> {
   const endpoint =
@@ -33,12 +60,18 @@ async function callServer(
           systemPrompt,
           userPrompt,
           config.temperature,
+          schema,
+          mode,
+          schemaName,
         )
       : buildOpenAITextRequest(
           config.serverModel,
           systemPrompt,
           userPrompt,
           config.temperature,
+          schema,
+          mode,
+          schemaName,
         );
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -80,11 +113,82 @@ async function callServer(
       await new Promise((r) =>
         setTimeout(r, DefaultConfig.serverRetryDelayMs * (retryCount + 1)),
       );
-      return callServer(systemPrompt, userPrompt, config, retryCount + 1);
+      return requestOnce(
+        systemPrompt,
+        userPrompt,
+        config,
+        schema,
+        schemaName,
+        mode,
+        retryCount + 1,
+      );
     }
 
-    throw new Error(typeof err === "string" ? err : (err as Error).message);
+    throw err;
   }
+}
+
+/**
+ * POST one prompt and degrade the response format only when the server rejects
+ * the format itself (400/422). Transport errors keep their own retry, and
+ * auth/not-found/rate-limit errors never trigger a silent downgrade.
+ */
+async function callServer(
+  systemPrompt: string,
+  userPrompt: string,
+  config: ServerConfig,
+  options: CallServerOptions = {},
+): Promise<ServerResponse> {
+  const chain = options.schema
+    ? FORMAT_CHAINS[config.serverSchema]
+    : config.serverSchema === "lmstudio"
+      ? (["none"] as ResponseFormatMode[])
+      : (["json_object"] as ResponseFormatMode[]);
+
+  const startIndex = options.startMode
+    ? Math.max(0, chain.indexOf(options.startMode))
+    : 0;
+  const modes = chain.slice(startIndex);
+  const prompt = options.correction
+    ? `${userPrompt}\n\nCORRECTION: ${options.correction}\nReturn the full corrected JSON now.`
+    : userPrompt;
+  const schemaName = options.schemaName ?? "manga_translation";
+
+  let lastError: unknown;
+
+  for (let i = 0; i < modes.length; i++) {
+    const mode = modes[i];
+    try {
+      const data = await requestOnce(
+        systemPrompt,
+        prompt,
+        config,
+        options.schema,
+        schemaName,
+        mode,
+      );
+      if (i > 0) {
+        console.warn(`[server] response_format fallback in use: ${mode}`);
+      }
+      return { data, format: mode };
+    } catch (err) {
+      const status = (err as Error & { status?: number }).status;
+      const canFallback =
+        (status === 400 || status === 422) && i < modes.length - 1;
+
+      if (canFallback) {
+        console.warn(
+          `[server] response_format ${mode} rejected (HTTP ${status}) — retrying with ${modes[i + 1]}`,
+        );
+        lastError = err;
+        continue;
+      }
+
+      throw err;
+    }
+  }
+
+  throw lastError;
 }
 
 export async function translateWithServer(
@@ -98,37 +202,44 @@ export async function translateWithServer(
     return { translations: [] };
   }
 
-  const { systemPrompt, userPrompt } = buildTranslationPrompts(
+  const { systemPrompt, userPrompt, schema } = buildTranslationPrompts(
     ocrResults,
     targetLang,
     sourceLang,
     seriesContext,
   );
 
-  const raw = await callServer(systemPrompt, userPrompt, config);
+  let response = await callServer(systemPrompt, userPrompt, config, {
+    schema,
+    schemaName: "manga_translation",
+  });
 
-  // One correction round-trip when the model drops/merges boxes (usually
-  // empty OCR boxes). The healed validator below guarantees the count, but
-  // a retry gives the model a chance to place real text first.
-  if (
-    raw &&
-    typeof raw === "object" &&
-    Array.isArray((raw as Record<string, any>).translations) &&
-    (raw as Record<string, any>).translations.length !== ocrResults.length
-  ) {
-    const received = (raw as Record<string, any>).translations.length;
+  try {
+    return validateTranslationResult(response.data, ocrResults.length, {
+      sourceTexts: ocrResults,
+      sourceLang,
+      targetLang,
+    });
+  } catch (error) {
+    if (!isTranslationValidationError(error)) throw error;
+
     console.warn(
-      `[server] count mismatch (received ${received}, expected ${ocrResults.length}) — requesting correction`,
+      `[server] validation failed (${error.code}): ${error.message} — requesting correction`,
     );
-    const corrected = await callServer(
-      systemPrompt,
-      `${userPrompt}\n\nCORRECTION: Your previous response contained ${received} items but EXACTLY ${ocrResults.length} are required — one per input box, same order, empty boxes as "". Return the full corrected JSON now.`,
-      config,
-    );
-    return validateTranslationResult(corrected, ocrResults.length);
-  }
 
-  return validateTranslationResult(raw, ocrResults.length);
+    response = await callServer(systemPrompt, userPrompt, config, {
+      schema,
+      schemaName: "manga_translation",
+      startMode: response.format,
+      correction: error.message,
+    });
+
+    return validateTranslationResult(response.data, ocrResults.length, {
+      sourceTexts: ocrResults,
+      sourceLang,
+      targetLang,
+    });
+  }
 }
 
 export async function makeSiteRuleWithServer(
@@ -136,8 +247,12 @@ export async function makeSiteRuleWithServer(
   path: string,
   config: ServerConfig,
 ): Promise<AIGeneratedRule> {
-  const { systemPrompt, userPrompt } = buildSiteRulePrompts(title, path);
-  return callServer(systemPrompt, userPrompt, config);
+  const { systemPrompt, userPrompt, schema } = buildSiteRulePrompts(title, path);
+  const response = await callServer(systemPrompt, userPrompt, config, {
+    schema,
+    schemaName: "site_rule",
+  });
+  return response.data;
 }
 
 export async function testServerConnection(config: ServerConfig) {

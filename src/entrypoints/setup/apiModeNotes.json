@@ -5,7 +5,7 @@
   },
   "lmstudio": {
     "title": "LM Studio Setup",
-    "content": "LM Studio provides an OpenAI-compatible local server.\n\n**Setup:**\n1. Download and install [LM Studio](https://lmstudio.ai)\n2. Download a model from the Discover tab\n3. Go to Local Server tab\n4. Click **Start Server** (default port: 1234)\n5. Copy the server URL shown\n\n**Note:** No CORS setup needed — works out of the box with extensions."
+    "content": "LM Studio provides an Experimental LM Studio own Schema in local server.\n\n**Setup:**\n1. Download and install [LM Studio](https://lmstudio.ai)\n2. Download a model from the Discover tab\n3. Go to Local Server tab\n4. Click **Start Server** (default port: 1234)\n5. Copy the server URL and the model you load in LM Studio\n\n**Note:** No CORS setup needed — works out of the box with extensions."
   },
   "jan": {
     "title": "JAN Setup",

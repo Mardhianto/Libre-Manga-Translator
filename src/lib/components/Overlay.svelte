@@ -48,6 +48,7 @@
           translations: Translations;
           sourceTexts?: string[];
           context?: { summary: string; dictionary: string };
+          diagnostics?: TranslationDiagnostics;
           gateSkip?: (GateReason | null)[];
           gate?: DebugEntry["gate"];
         }
@@ -256,6 +257,14 @@
 
       if (typeof result === "object" && "error" in result) {
         addToast(`Retranslation failed: ${result.error}`, "error");
+        return;
+      }
+
+      if (result.diagnostics?.untranslated?.includes(0)) {
+        addToast(
+          `${label}: the model echoed the source instead of translating — not applied.`,
+          "warn",
+        );
         return;
       }
 
@@ -512,6 +521,16 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
 
     translations = result.translations ?? [];
     sourceTexts = result.sourceTexts ?? [];
+
+    const echoed = result.diagnostics?.untranslated?.length ?? 0;
+    if (echoed > 0) {
+      addToast(
+        `${echoed} box${echoed === 1 ? "" : "es"} echoed the source and ${
+          echoed === 1 ? "was" : "were"
+        } left untranslated.`,
+        "warn",
+      );
+    }
 
     // The script gate records which regions it held back; those boxes get a
     // dashed mark and a per-box override, their originals stay untouched.

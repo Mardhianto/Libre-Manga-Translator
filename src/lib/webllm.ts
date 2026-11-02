@@ -2,7 +2,7 @@ import type { MLCEngine } from "@mlc-ai/web-llm";
 import { DefaultConfig, normalizeLlmModel } from "./configs";
 import { createLlmEngine } from "./llm-engine";
 import { buildSiteRulePrompts, buildTranslationPrompts } from "./prompts";
-import { parseLlmJson, validateTranslationResult } from "./server/validator";
+import { parseLlmJson, isTranslationValidationError, validateTranslationResult } from "./server/validator";
 
 let globalEngine: MLCEngine | null = null;
 let currentlyLoadedModel: string | null = null;
@@ -35,30 +35,31 @@ export async function translateLocal(
     temperature,
   );
 
-  // One correction round-trip on count mismatch (usually dropped empty
-  // boxes). The healed validator guarantees the count; the retry gives the
-  // model a chance to place real text first.
-  if (
-    raw &&
-    typeof raw === "object" &&
-    Array.isArray((raw as Record<string, any>).translations) &&
-    (raw as Record<string, any>).translations.length !== ocrResults.length
-  ) {
-    const received = (raw as Record<string, any>).translations.length;
+  try {
+    return validateTranslationResult(raw, ocrResults.length, {
+      sourceTexts: ocrResults,
+      sourceLang,
+      targetLang,
+    });
+  } catch (error) {
+    if (!isTranslationValidationError(error)) throw error;
+
     console.warn(
-      `[webllm] count mismatch (received ${received}, expected ${ocrResults.length}) — requesting correction`,
+      `[webllm] validation failed (${error.code}): ${error.message} — requesting correction`,
     );
     const corrected = await runLLMModel(
       systemPrompt,
-      `${userPrompt}\n\nCORRECTION: Your previous response contained ${received} items but EXACTLY ${ocrResults.length} are required — one per input box, same order, empty boxes as "". Return the full corrected JSON now.`,
+      `${userPrompt}\n\nCORRECTION: ${error.message}\nReturn the full corrected JSON now.`,
       schema,
       resolvedModel,
       temperature,
     );
-    return validateTranslationResult(corrected, ocrResults.length);
+    return validateTranslationResult(corrected, ocrResults.length, {
+      sourceTexts: ocrResults,
+      sourceLang,
+      targetLang,
+    });
   }
-
-  return validateTranslationResult(raw, ocrResults.length);
 }
 
 export async function makeSiteRuleLocal(
@@ -85,7 +86,7 @@ export async function makeSiteRuleLocal(
 async function runLLMModel(
   systemPrompt: string,
   userPrompt: string,
-  schema: string,
+  schema: object,
   model: string,
   temperature: number,
 ) {
@@ -106,7 +107,7 @@ async function runLLMModel(
     temperature,
     response_format: {
       type: "json_object",
-      schema,
+      schema: JSON.stringify(schema),
     },
   });
 
