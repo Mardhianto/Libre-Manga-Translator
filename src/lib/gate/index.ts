@@ -61,6 +61,15 @@ export interface GateSummary {
   group?: string;
   /** the OSD model could not load; text-only verification still ran */
   unavailable?: boolean;
+  /** Winning OSD label behind `group` under Auto-Detect, "" when none voted. */
+  label?: string;
+  /**
+   * How `group` was chosen:
+   *  - "gate"     OSD named a script (majority, or best label when there was none);
+   *  - "explicit" the user picked a source language;
+   *  - "fallback" nothing identified the page, so `latin` was assumed.
+   */
+  groupSource?: "gate" | "explicit" | "fallback";
 }
 
 export function gateModeFor(
@@ -121,6 +130,31 @@ export function majorityLabel(verdicts: RegionVerdict[]): string | null {
     .filter(([label]) => label !== top[0])
     .reduce((a, b) => a + b[1], 0);
   return top[1] > rest ? top[0] : null;
+}
+
+/**
+ * Best label with ANY weight, plurality included (LMT-030).
+ *
+ * `majorityLabel` deliberately refuses a bare plurality because a page script
+ * must outvote every other script before the gate trusts it. That refusal is
+ * correct for *skipping boxes*, but it is the wrong answer for *picking an OCR
+ * pack*: with no majority, the strongest reading still beats the alternative
+ * of silently assuming Latin. Callers must mark the result as a pick, not a
+ * verdict — `groupSource` in `GateSummary` does that.
+ *
+ * Deterministic: ties break on the lower label so two runs agree.
+ */
+export function bestLabel(verdicts: RegionVerdict[]): string | null {
+  const byLabel = new Map<string, number>();
+  for (const v of verdicts) {
+    if (v.decision === "uncertain" || !v.script) continue;
+    const base = baseLabel(v.script);
+    byLabel.set(base, (byLabel.get(base) ?? 0) + v.weight);
+  }
+  if (byLabel.size === 0) return null;
+  return [...byLabel.entries()].sort(
+    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+  )[0][0];
 }
 
 const rescueHolds = (text: string): boolean =>

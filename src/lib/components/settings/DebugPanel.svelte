@@ -400,6 +400,9 @@
                     {log.gate.skipped} skipped
                   </span>
                   {#if log.gate.group}· {log.gate.group}{/if}
+                  {#if log.gate.groupSource === "fallback"}
+                    · <span class="text-amber-500">assumed</span>
+                  {/if}
                   {#if log.gate.unavailable}
                     · <span class="text-red-400">model unavailable - text-only</span>
                   {/if}
@@ -408,7 +411,34 @@
               {#if log.langGroup}
                 <div>
                   <span class="text-zinc-500 uppercase">Group:</span> {log.langGroup}
+                  {#if log.langGroupFallback}
+                    <span class="text-amber-500" title="No model or detection named this group; it was assumed">
+                      assumed
+                    </span>
+                  {/if}
                 </div>
+              {/if}
+              {#if log.llmCalls || log.promptChars || log.finishReason}
+                <div class="col-span-2 text-[10px] font-mono text-zinc-500">
+                  {#if log.llmCalls}{log.llmCalls} call{log.llmCalls === 1 ? "" : "s"} ·{/if}
+                  {#if log.promptChars}{log.promptChars} prompt chars ·{/if}
+                  finish: {log.finishReason ?? "unknown"}
+                  {#if log.truncated}
+                    · <span class="text-red-400">truncated</span>
+                  {/if}
+                  {#if log.padded}
+                    · <span class="text-red-400">padded</span>
+                  {/if}
+                </div>
+              {/if}
+              {#if log.rawResponse}
+                <details class="col-span-2">
+                  <summary class="text-[10px] font-mono text-zinc-500 cursor-pointer">
+                    Raw response ({log.rawResponse.length} chars)
+                  </summary>
+                  <pre
+                    class="mt-1 p-1.5 rounded bg-[var(--surface-panel)] border border-[var(--border-faint)] text-[10px] font-mono whitespace-pre-wrap break-all max-h-48 overflow-auto">{log.rawResponse}</pre>
+                </details>
               {/if}
               {#if log.version || log.device || log.backend}
                 <div class="col-span-2 flex items-center gap-1.5 flex-wrap">

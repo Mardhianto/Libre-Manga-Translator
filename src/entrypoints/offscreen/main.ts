@@ -6,6 +6,7 @@ import {
   makeSiteRuleWithServer,
   translateWithServer,
 } from "@/lib/server/main";
+import { diagnosticsFromError } from "@/lib/server/validator";
 import { deleteModelAllInfoInCache, hasModelInCache } from "@mlc-ai/web-llm";
 import { makeSiteRuleLocal, translateLocal } from "@/lib/webllm";
 import { inpaintImageAuto, inpaintImageQuality } from "@/lib/inpaint/ladder";
@@ -37,6 +38,23 @@ function serverConfig(config: Record<string, any>) {
     useServerApiKey: config.useServerApiKey,
     serverApiKey: config.serverApiKey,
     temperature: config.llmTemperature,
+  };
+}
+
+/**
+ * Failure replies keep the run facts the backend stamped on the error
+ * (LMT-032). Without this, a truncated or unparseable answer reached the Debug
+ * panel as a bare message, which is the one case where the raw response is the
+ * whole diagnosis.
+ *
+ * Only the run fields are sent: a failed page has no expected/received count,
+ * and inventing zeros would read like a validation measurement.
+ */
+function errorResponse(err: unknown) {
+  const run = diagnosticsFromError(err);
+  return {
+    error: (err as Error).message,
+    ...(run ? { diagnostics: run } : {}),
   };
 }
 
@@ -109,9 +127,9 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
               backend,
             });
           } catch (err) {
-            sendResponse({ error: (err as Error).message });
+            sendResponse(errorResponse(err));
           }
-        })().catch((err) => sendResponse({ error: err.message }));
+        })().catch((err) => sendResponse(errorResponse(err)));
       } else if (currentMode === "api") {
         (async () => {
           await yieldToMain();
@@ -129,7 +147,7 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
             gateSkip: [null],
             timing: { translate: performance.now() - tTrans },
           });
-        })().catch((err) => sendResponse({ error: err.message }));
+        })().catch((err) => sendResponse(errorResponse(err)));
       } else {
         (async () => {
           await yieldToMain();
@@ -150,7 +168,7 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
             gate: { mode: "off", checked: 0, skipped: 0, unavailable: false },
             timing: { translate: performance.now() - tTrans },
           });
-        })().catch((err) => sendResponse({ error: err.message }));
+        })().catch((err) => sendResponse(errorResponse(err)));
       }
       return true;
     }
@@ -186,6 +204,9 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
             seriesContext,
             llmModel,
             llmTemperature,
+            // Auto-Detect: tell the LLM which script the OCR gate settled on
+            // instead of letting it guess the input language (LMT-030).
+            ocrOut.gate?.label || undefined,
           );
           sendResponse({
             ...res,
@@ -196,9 +217,9 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
             backend,
           });
         } catch (err) {
-          sendResponse({ error: (err as Error).message });
+          sendResponse(errorResponse(err));
         }
-      })().catch((err) => sendResponse({ error: err.message }));
+      })().catch((err) => sendResponse(errorResponse(err)));
     } else if (currentMode === "api") {
       (async () => {
         await yieldToMain();
@@ -223,6 +244,9 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
           sourceLang,
           seriesContext,
           serverConfig(msg.config),
+          // Auto-Detect: the prompt names the script the gate settled on
+          // instead of omitting the source language entirely (LMT-030).
+          ocrOut.gate?.label || undefined,
         );
         sendResponse({
           ...res,
@@ -231,7 +255,7 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
           gate: ocrOut.gate,
           timing: { ocr, translate: performance.now() - tTrans },
         });
-      })().catch((err) => sendResponse({ error: err.message }));
+      })().catch((err) => sendResponse(errorResponse(err)));
     } else {
       (async () => {
         await yieldToMain();
@@ -257,7 +281,7 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
           timing: { translate: performance.now() - tTrans },
           backend: await detectBackend(),
         });
-      })().catch((err) => sendResponse({ error: err.message }));
+      })().catch((err) => sendResponse(errorResponse(err)));
     }
 
     return true;

@@ -37,6 +37,24 @@ import "@/assets/app.css";
 const srcKey = (src: string) =>
   src.startsWith("data:") ? quickHash(src) : src;
 
+/**
+ * Copy the run-level diagnostic facts onto a `DebugEntry` (LMT-032).
+ *
+ * The validator already clips `rawResponse`; passing `undefined` for every
+ * absent field keeps the stored entry honest instead of writing zeros that
+ * look like measurements.
+ */
+function runDiagnosticFields(d?: TranslationDiagnostics) {
+  return {
+    rawResponse: d?.rawResponse,
+    llmCalls: d?.llmCalls,
+    finishReason: d?.finishReason,
+    promptChars: d?.promptChars,
+    padded: d?.padded,
+    truncated: d?.truncated,
+  };
+}
+
 // Wait until the image has a real layout (loaded + non-zero rendered box).
 // Measuring a hidden/not-yet-loaded image freezes the wrapper at 0×0 and
 // misplaces the whole overlay on revisit.
@@ -529,6 +547,7 @@ export default defineContentScript({
                         sourceLang: srcLang,
                         targetLang: tgtLang,
                         langGroup: debugCtx.langGroup,
+                        langGroupFallback: resolveLangGroup(srcLang).fellBack,
                         bboxCount: bboxes.length,
                         timing: { total: duration },
 
@@ -547,6 +566,11 @@ export default defineContentScript({
                           llm: curMode === "webgpu" ? debugCtx.llmModel : undefined,
                           server: curMode === "api" ? debugCtx.serverModel : undefined,
                         },
+                        // A failed page is where the raw answer matters most
+                        // (truncated JSON, wrong shape) — the backend stamps
+                        // these onto the error and the offscreen relay forwards
+                        // them (LMT-032).
+                        ...runDiagnosticFields(resp.diagnostics),
                         error: resp.error,
                       })
 
@@ -590,15 +614,28 @@ export default defineContentScript({
                             skipped: gate.skipped,
                             group: gate.group,
                             unavailable: gate.unavailable,
+                            label: gate.label,
+                            groupSource: gate.groupSource,
                           }
                         : undefined,
                       sourceLang: srcLang,
                       targetLang: tgtLang,
-                      langGroup: debugCtx.langGroup,
+                      // Prefer the gate's resolved pack: `debugCtx.langGroup` is
+                      // the pre-OCR `resolveLangGroup` guess, so under
+                      // Auto-Detect it says "latin" even when the gate picked
+                      // chinese (LMT-030).
+                      langGroup: gate?.group ?? debugCtx.langGroup,
+                      // Was `langGroup` a silent assumption rather than a
+                      // resolved pack? The gate's own source is authoritative;
+                      // otherwise fall back to what the config resolver says.
+                      langGroupFallback: gate?.groupSource
+                        ? gate.groupSource === "fallback"
+                        : resolveLangGroup(srcLang).fellBack,
                       bboxCount: bboxes.length,
                       sourceTexts,
                       translations,
                       untranslated: diagnostics?.untranslated,
+                      ...runDiagnosticFields(diagnostics),
                     timing,
                     ocrMinConfidence: debugCtx.ocrMinConfidence,
                     detectionMinConfidence: debugCtx.detectionMinConfidence,
@@ -608,7 +645,12 @@ export default defineContentScript({
                       curMode === "gemini" ? debugCtx.geminiModel : undefined,
                     models: {
                       detection: debugCtx.detectionModel,
-                      ocr: debugCtx.ocrModel,
+                      // The pack actually loaded: `debugCtx.ocrModel` is the
+                      // pre-OCR guess, which under Auto-Detect always says latin
+                      // (LMT-030).
+                      ocr: gate?.group
+                        ? DefaultConfig.ocrModelPath(gate.group)
+                        : debugCtx.ocrModel,
                       llm: curMode === "webgpu" ? debugCtx.llmModel : undefined,
                       server: curMode === "api" ? debugCtx.serverModel : undefined,
                     },
@@ -618,7 +660,7 @@ export default defineContentScript({
                     })
                     .catch((err) => console.warn("LMT: debug-log write failed:", err));
 
-                  // LMT-026: only a fully translated page may write cache or
+                  // only a fully translated page may write cache or
                   // context. A padded/echoed page keeps its debug entry (that
                   // is the whole point of the log) but must not poison the
                   // next prompt or resurrect echoed lines from cache.

@@ -7,9 +7,14 @@ import {
   type ServerConfig,
 } from "./schemas";
 import {
+  attachDiagnostics,
+  clipRawResponse,
   isTranslationValidationError,
+  mergeRunInfo,
   parseLlmJson,
+  promptChars,
   validateTranslationResult,
+  type LlmRunInfo,
 } from "./validator";
 
 export type { ServerConfig } from "./schemas";
@@ -22,11 +27,15 @@ interface CallServerOptions {
   startMode?: ResponseFormatMode;
   /** Appended to the user prompt for the single correction round-trip. */
   correction?: string;
+  /** Accumulates one entry per HTTP round-trip (LMT-032). */
+  calls?: LlmRunInfo[];
 }
 
 interface ServerResponse {
   data: any;
   format: ResponseFormatMode;
+  /** Raw answer + stop reason for the call that produced `data`. */
+  info: LlmRunInfo;
 }
 
 const FORMAT_CHAINS: Record<ServerConfig["serverSchema"], ResponseFormatMode[]> = {
@@ -42,7 +51,7 @@ async function requestOnce(
   schemaName: string,
   mode: ResponseFormatMode,
   retryCount = 0,
-): Promise<any> {
+): Promise<{ data: any; info: LlmRunInfo }> {
   const endpoint =
     config.serverSchema === "lmstudio"
       ? DefaultConfig.serverEndpoints.lmstudio
@@ -104,7 +113,27 @@ async function requestOnce(
       throw new Error("Empty response from server");
     }
 
-    return parseLlmJson(content);
+    // Both schemas report a stop reason; OpenAI nests it per choice, LM Studio
+    // puts it on the item. "length" is the truncation signal (LMT-032).
+    const finishReason: string | undefined =
+      config.serverSchema === "lmstudio"
+        ? (data?.output?.[0]?.finish_reason ?? data?.stats?.finish_reason)
+        : data?.choices?.[0]?.finish_reason;
+
+    const info: LlmRunInfo = {
+      rawResponse: clipRawResponse(content),
+      finishReason:
+        typeof finishReason === "string" ? finishReason : undefined,
+      promptChars: promptChars(systemPrompt, userPrompt),
+    };
+
+    try {
+      return { data: parseLlmJson(content), info };
+    } catch (parseError) {
+      // Keep the raw cut-off/malformed answer on the error: if this attempt is
+      // the one that finally fails, that text is the entire diagnosis.
+      throw attachDiagnostics(parseError, info);
+    }
   } catch (err) {
     const status = (err as Error & { status?: number }).status;
     const isClientError = status !== undefined && status >= 400 && status < 500;
@@ -159,7 +188,7 @@ async function callServer(
   for (let i = 0; i < modes.length; i++) {
     const mode = modes[i];
     try {
-      const data = await requestOnce(
+      const { data, info } = await requestOnce(
         systemPrompt,
         prompt,
         config,
@@ -167,10 +196,13 @@ async function callServer(
         schemaName,
         mode,
       );
+      // Count only answered round-trips: a 400 format rejection spent no
+      // inference, so counting it as a call would overstate page cost.
+      options.calls?.push(info);
       if (i > 0) {
         console.warn(`[server] response_format fallback in use: ${mode}`);
       }
-      return { data, format: mode };
+      return { data, format: mode, info };
     } catch (err) {
       const status = (err as Error & { status?: number }).status;
       const canFallback =
@@ -184,7 +216,11 @@ async function callServer(
         continue;
       }
 
-      throw err;
+      // Surface the diagnostics a caller already accumulated (LMT-032): a
+      // failure must still explain what the model was sent and returned.
+      throw options.calls?.length
+        ? attachDiagnostics(err, mergeRunInfo(options.calls))
+        : err;
     }
   }
 
@@ -197,6 +233,8 @@ export async function translateWithServer(
   sourceLang: string,
   seriesContext: SeriesContext | undefined,
   config: ServerConfig,
+  /** Auto-Detect only: the script the OCR gate identified (LMT-030). */
+  detectedLabel?: string | null,
 ): Promise<TranslateResult> {
   if (!ocrResults || ocrResults.length === 0) {
     return { translations: [] };
@@ -207,11 +245,17 @@ export async function translateWithServer(
     targetLang,
     sourceLang,
     seriesContext,
+    detectedLabel,
   );
+
+  // One list for the whole page: a format fallback and the correction round
+  // both cost a round-trip and must show up in `llmCalls` (LMT-032).
+  const calls: LlmRunInfo[] = [];
 
   let response = await callServer(systemPrompt, userPrompt, config, {
     schema,
     schemaName: "manga_translation",
+    calls,
   });
 
   try {
@@ -219,6 +263,7 @@ export async function translateWithServer(
       sourceTexts: ocrResults,
       sourceLang,
       targetLang,
+      run: mergeRunInfo(calls),
     });
   } catch (error) {
     if (!isTranslationValidationError(error)) throw error;
@@ -232,12 +277,14 @@ export async function translateWithServer(
       schemaName: "manga_translation",
       startMode: response.format,
       correction: error.message,
+      calls,
     });
 
     return validateTranslationResult(response.data, ocrResults.length, {
       sourceTexts: ocrResults,
       sourceLang,
       targetLang,
+      run: mergeRunInfo(calls),
     });
   }
 }

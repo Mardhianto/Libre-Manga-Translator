@@ -21,6 +21,7 @@ import {
   ctcBestPath,
 } from "../src/lib/gate/ctc";
 import {
+  bestLabel,
   judgeVotes,
   majorityLabel,
   decideSkip,
@@ -142,6 +143,46 @@ check(
     { decision: "wrong-script", script: "Latin", weight: 3 },
     { decision: "wrong-script", script: "Cyrillic", weight: 3 },
   ]) === null,
+);
+
+// bestLabel: the OCR-pack question (LMT-030). Same votes as above, but a
+// plurality must still name a script — falling through to latin here is what
+// read Japanese pages with the Latin rec model.
+check(
+  "best: plurality names a script",
+  bestLabel([
+    { decision: "wrong-script", script: "Latin", weight: 3 },
+    { decision: "wrong-script", script: "Cyrillic", weight: 2 },
+  ]) === "Latin",
+);
+check(
+  "best: picks the heaviest group, not the first",
+  bestLabel([
+    { decision: "clean", script: "Latin", weight: 1 },
+    { decision: "clean", script: "Japanese", weight: 4 },
+  ]) === "Japanese",
+);
+check(
+  "best: ties break deterministically",
+  bestLabel([
+    { decision: "clean", script: "Cyrillic", weight: 2 },
+    { decision: "clean", script: "Latin", weight: 2 },
+  ]) === "Cyrillic",
+);
+check(
+  "best: uncertain/empty verdicts never vote",
+  bestLabel([
+    { decision: "uncertain", script: "", weight: 9 },
+    { decision: "uncertain", script: "Latin", weight: 9 },
+  ]) === null,
+);
+check("best: no verdicts is null", bestLabel([]) === null);
+check(
+  "best: agrees with majority when a majority exists",
+  bestLabel([
+    { decision: "clean", script: "Japanese", weight: 5 },
+    { decision: "wrong-script", script: "Latin", weight: 3 },
+  ]) === "Japanese",
 );
 
 // --- decideSkip matrix --------------------------------------------------------

@@ -1,8 +1,15 @@
 import { describe, it, expect } from "bun:test";
 import {
+  RAW_RESPONSE_LIMIT,
   TranslationValidationError,
+  clipRawResponse,
+  diagnosticsFromError,
+  attachDiagnostics,
+  isTruncatedFinishReason,
   maskUntranslated,
+  mergeRunInfo,
   parseLlmJson,
+  promptChars,
   validateTranslationResult,
 } from "../../src/lib/server/validator";
 
@@ -251,5 +258,145 @@ describe("validateTranslationResult", () => {
       1,
     );
     expect(result.context).toEqual({ summary: "", dictionary: "" });
+  });
+
+  it("keeps diagnostics shape unchanged when no run info is given", () => {
+    const result = validateTranslationResult(["A"], 1);
+    expect(result.diagnostics).toEqual({
+      expectedCount: 1,
+      receivedCount: 1,
+      untranslated: [],
+      clean: true,
+    });
+  });
+
+  it("spreads run facts into diagnostics", () => {
+    const result = validateTranslationResult(["A"], 1, {
+      run: {
+        rawResponse: '{"translations":["A"]}',
+        finishReason: "stop",
+        promptChars: 1234,
+        llmCalls: 1,
+      },
+    });
+    expect(result.diagnostics).toEqual({
+      expectedCount: 1,
+      receivedCount: 1,
+      untranslated: [],
+      clean: true,
+      rawResponse: '{"translations":["A"]}',
+      finishReason: "stop",
+      promptChars: 1234,
+      llmCalls: 1,
+      truncated: false,
+      padded: false,
+    });
+  });
+
+  it("marks a length finish reason as truncated", () => {
+    const result = validateTranslationResult(["A"], 1, {
+      run: { finishReason: "MAX_TOKENS" },
+    });
+    expect(result.diagnostics?.truncated).toBe(true);
+  });
+});
+
+describe("clipRawResponse", () => {
+  it("passes short answers through untouched", () => {
+    expect(clipRawResponse("hello")).toBe("hello");
+  });
+
+  it("caps long answers and states how much was cut", () => {
+    const long = "x".repeat(RAW_RESPONSE_LIMIT + 10);
+    const clipped = clipRawResponse(long);
+    expect(clipped.startsWith("x".repeat(RAW_RESPONSE_LIMIT))).toBe(true);
+    expect(clipped.endsWith("[10 chars cut]")).toBe(true);
+    expect(clipped.length).toBeLessThan(long.length + 32);
+  });
+
+  it("treats missing content as an empty string", () => {
+    expect(clipRawResponse(undefined)).toBe("");
+    expect(clipRawResponse(null)).toBe("");
+  });
+});
+
+describe("isTruncatedFinishReason", () => {
+  it("recognizes provider cut reasons across spellings", () => {
+    for (const reason of [
+      "length",
+      "LENGTH",
+      "max_tokens",
+      "MAX_TOKENS",
+      "max_output_tokens",
+      "token_limit",
+    ]) {
+      expect(isTruncatedFinishReason(reason)).toBe(true);
+    }
+  });
+
+  it("does not treat normal stops as truncation", () => {
+    for (const reason of ["stop", "STOP", "end_turn", "", undefined]) {
+      expect(isTruncatedFinishReason(reason)).toBe(false);
+    }
+  });
+});
+
+describe("mergeRunInfo", () => {
+  it("returns nothing for zero calls", () => {
+    expect(mergeRunInfo([])).toEqual({});
+  });
+
+  it("keeps the last raw answer but the first prompt size", () => {
+    // The correction prompt is longer; reporting it would overstate the cost of
+    // a normal page.
+    expect(
+      mergeRunInfo([
+        { rawResponse: "first", finishReason: "stop", promptChars: 500 },
+        { rawResponse: "second", finishReason: "length", promptChars: 900 },
+      ]),
+    ).toEqual({
+      rawResponse: "second",
+      finishReason: "length",
+      promptChars: 500,
+      llmCalls: 2,
+    });
+  });
+
+  it("derives llmCalls from the array length", () => {
+    expect(
+      mergeRunInfo([{ promptChars: 1 }, { promptChars: 2 }, { promptChars: 3 }])
+        .llmCalls,
+    ).toBe(3);
+  });
+});
+
+describe("promptChars", () => {
+  it("counts system + user prompt characters", () => {
+    expect(promptChars("abc", "de")).toBe(5);
+  });
+});
+
+describe("attachDiagnostics / diagnosticsFromError", () => {
+  it("round-trips run facts on a thrown error", () => {
+    const err = new Error("bad JSON");
+    attachDiagnostics(err, {
+      rawResponse: "cut off",
+      finishReason: "MAX_TOKENS",
+      promptChars: 42,
+    });
+    expect(diagnosticsFromError(err)).toEqual({
+      rawResponse: "cut off",
+      finishReason: "MAX_TOKENS",
+      promptChars: 42,
+      llmCalls: 1,
+    });
+    // Must not leak into JSON/spread: the error message stays clean.
+    expect(Object.keys(err)).not.toContain("lmtDiagnostics");
+  });
+
+  it("ignores non-object errors", () => {
+    expect(attachDiagnostics("boom", { promptChars: 1 })).toBe("boom");
+    expect(diagnosticsFromError("boom")).toBeUndefined();
+    expect(diagnosticsFromError(undefined)).toBeUndefined();
   });
 });

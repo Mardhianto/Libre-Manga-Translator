@@ -257,14 +257,20 @@ export interface ResolvedLangGroup {
 
 /**
  * Single source of truth for source-language → rec-model group resolution.
- * - "Latin" (capitalised UI label) and "Auto-Detect" resolve to "latin".
+ * - "Latin" (capitalised UI label) resolves to "latin" and is not a fallback.
+ * - "Auto-Detect" resolves to "latin" **as a placeholder**: the gate has not
+ *   spoken yet, so latin is an assumption, not an answer. `fellBack: true`
+ *   lets callers log/notice it instead of claiming the page was identified
  * - Direct `ocrLangGroupMap` hits resolve silently.
  * - Anything else falls back to "latin" with `fellBack: true` so callers can
  *   surface which `rec.onnx` was actually used.
  */
 export function resolveLangGroup(sourceLang: string): ResolvedLangGroup {
-  if (sourceLang === "Latin" || sourceLang === "Auto-Detect") {
+  if (sourceLang === "Latin") {
     return { group: "latin", fellBack: false };
+  }
+  if (sourceLang === "Auto-Detect") {
+    return { group: "latin", fellBack: true };
   }
   const mapped = ocrLangGroupMap[sourceLang];
   if (mapped && (SUPPORTED_LANG_GROUPS as readonly string[]).includes(mapped)) {

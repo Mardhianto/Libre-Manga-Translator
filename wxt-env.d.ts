@@ -67,6 +67,22 @@ interface TranslationDiagnostics {
   /** Box indices whose output echoed the source; masked before rendering. */
   untranslated: number[];
   clean: boolean;
+  /**
+   * Model answer before parsing, capped at `RAW_RESPONSE_LIMIT` (4 KB).
+   * Present on validation/parse failures too, so a Debug export can show
+   * whether the page was truncated, the wrong shape, or an echo.
+   */
+  rawResponse?: string;
+  /** LLM requests spent on this page (format fallbacks + correction round). */
+  llmCalls?: number;
+  /** Provider stop reason; "length"/"MAX_TOKENS" means the answer was cut. */
+  finishReason?: string;
+  /** Characters sent: system prompt + user prompt. */
+  promptChars?: number;
+  /** The validator never fabricates missing entries, so this is false today. */
+  padded?: boolean;
+  /** True when `finishReason` says the provider hit its output cap. */
+  truncated?: boolean;
 }
 
 interface TranslateResult {
@@ -87,10 +103,24 @@ interface DebugEntry {
   sourceLang: string;
   targetLang: string;
   langGroup?: string;
+  /** True when `langGroup` is a silent fallback, not a resolved model pack. */
+  langGroupFallback?: boolean;
   bboxCount: number;
   sourceTexts?: string[];
   translations?: string[];
   untranslated?: number[];
+  /** Model answer before parsing (first 4 KB) — see `TranslationDiagnostics`. */
+  rawResponse?: string;
+  /** LLM requests spent on this page. */
+  llmCalls?: number;
+  /** Provider stop reason; "length" means the answer was cut. */
+  finishReason?: string;
+  /** Characters sent: system prompt + user prompt. */
+  promptChars?: number;
+  /** Validator never fabricates entries, so this stays false today. */
+  padded?: boolean;
+  /** `finishReason` hit the output cap. */
+  truncated?: boolean;
   timing: {
     detect?: number;
     ocr?: number;
@@ -110,6 +140,10 @@ interface DebugEntry {
     skipped: number;
     group?: string;
     unavailable?: boolean;
+    /** OSD label the page majority settled on, when Auto-Detect named one. */
+    label?: string;
+    /** How `group` was chosen: the gate's own pick, explicit source, or latin fallback. */
+    groupSource?: "gate" | "explicit" | "fallback";
   };
   inpaintStats?: {
     fill: number;

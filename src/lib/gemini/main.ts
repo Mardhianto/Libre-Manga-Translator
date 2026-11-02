@@ -2,7 +2,15 @@ import { MAKE_SITE_RULE_PROMPT } from "../adapters";
 import { DefaultConfig } from "../configs";
 import { drawNumberedBboxes } from "./utils";
 import { buildTranslationPrompts } from "../prompts";
-import { isTranslationValidationError, validateTranslationResult } from "../server/validator";
+import {
+  attachDiagnostics,
+  clipRawResponse,
+  isTranslationValidationError,
+  mergeRunInfo,
+  promptChars,
+  validateTranslationResult,
+  type LlmRunInfo,
+} from "../server/validator";
 
 export async function translateWithGemini(
   imageSrc: string,
@@ -13,6 +21,8 @@ export async function translateWithGemini(
   seriesContext?: SeriesContext,
   model = DefaultConfig.geminiModels[0].id,
   temperature = DefaultConfig.llmTemperature,
+  /** Auto-Detect only: the script the OCR gate identified (LMT-030). */
+  detectedLabel?: string | null,
 ): Promise<TranslateResult> {
   const cleanBase64 = (await drawNumberedBboxes(imageSrc, bboxes)).replace(
     /^data:image\/(png|jpeg|webp);base64,/,
@@ -23,8 +33,18 @@ export async function translateWithGemini(
     !seriesContext?.dictionary ||
     (seriesContext?.translatedCount ?? 0) % DefaultConfig.minTranslations === 0;
 
+  // "Auto-Detect" is a UI choice, not a language: name the script the gate
+  // actually identified instead of dropping the clause and letting the model
+  // guess the input language (LMT-030).
+  const sourceClause =
+    sourceLang === "Auto-Detect"
+      ? detectedLabel
+        ? ` FROM ${detectedLabel.toUpperCase()} (auto-detected script)`
+        : " FROM the source language of the text in each box"
+      : ` FROM ${sourceLang.toUpperCase()}`;
+
   const systemPrompt = `You are a professional manga translator${seriesContext?.seriesName ? ` working on "${seriesContext.seriesName}"` : ""}.
-Translate the text in the numbered bounding boxes in the provided image${sourceLang !== "Auto-Detect" ? ` FROM ${sourceLang.toUpperCase()}` : ""} INTO ${targetLang.toUpperCase()}.
+Translate the text in the numbered bounding boxes in the provided image${sourceClause} INTO ${targetLang.toUpperCase()}.
 Maintain the tone and context of the scene.
 ${seriesContext?.summary ? `\nSeries context: ${seriesContext.summary}` : ""}
 ${seriesContext?.dictionary ? `\nTerm dictionary (always use these): ${seriesContext.dictionary}` : ""}
@@ -54,32 +74,12 @@ ${
     : ""
 }`;
 
-  const raw = await sendRequestToGemini(
-    systemPrompt,
-    userPrompt,
-    apiKey,
-    model,
-    temperature,
-    {
-      mimeType: "image/jpeg",
-      data: cleanBase64,
-    },
-  );
-
+  const calls: LlmRunInfo[] = [];
+  let first: { data: any; info: LlmRunInfo };
   try {
-    return validateTranslationResult(raw, bboxes.length, {
-      sourceLang,
-      targetLang,
-    });
-  } catch (error) {
-    if (!isTranslationValidationError(error)) throw error;
-
-    console.warn(
-      `[gemini] validation failed (${error.code}): ${error.message} — requesting correction`,
-    );
-    const corrected = await sendRequestToGemini(
+    first = await sendRequestToGemini(
       systemPrompt,
-      `${userPrompt}\n\nCORRECTION: ${error.message}\nReturn the full corrected JSON now.`,
+      userPrompt,
       apiKey,
       model,
       temperature,
@@ -88,10 +88,46 @@ ${
         data: cleanBase64,
       },
     );
-    return validateTranslationResult(corrected, bboxes.length, {
+  } catch (error) {
+    throw attachDiagnostics(error, {
+      promptChars: promptChars(systemPrompt, userPrompt),
+    });
+  }
+  calls.push(first.info);
+
+  try {
+    return validateTranslationResult(first.data, bboxes.length, {
       sourceLang,
       targetLang,
+      run: mergeRunInfo(calls),
     });
+  } catch (error) {
+    if (!isTranslationValidationError(error)) throw error;
+
+    console.warn(
+      `[gemini] validation failed (${error.code}): ${error.message} — requesting correction`,
+    );
+    try {
+      const corrected = await sendRequestToGemini(
+        systemPrompt,
+        `${userPrompt}\n\nCORRECTION: ${error.message}\nReturn the full corrected JSON now.`,
+        apiKey,
+        model,
+        temperature,
+        {
+          mimeType: "image/jpeg",
+          data: cleanBase64,
+        },
+      );
+      calls.push(corrected.info);
+      return validateTranslationResult(corrected.data, bboxes.length, {
+        sourceLang,
+        targetLang,
+        run: mergeRunInfo(calls),
+      });
+    } catch (retryError) {
+      throw attachDiagnostics(retryError, mergeRunInfo(calls));
+    }
   }
 }
 
@@ -103,46 +139,65 @@ export async function translateTextWithGemini(
   seriesContext?: SeriesContext,
   model = DefaultConfig.geminiModels[0].id,
   temperature = DefaultConfig.llmTemperature,
+  /** Auto-Detect only: the script the OCR gate identified (LMT-030). */
+  detectedLabel?: string | null,
 ): Promise<TranslateResult> {
   const { systemPrompt, userPrompt } = buildTranslationPrompts(
     [text],
     targetLang,
     sourceLang,
     seriesContext,
+    detectedLabel,
   );
 
-  const raw = await sendRequestToGemini(
-    systemPrompt,
-    userPrompt,
-    apiKey,
-    model,
-    temperature,
-  );
+  const calls: LlmRunInfo[] = [];
+  let first: { data: any; info: LlmRunInfo };
+  try {
+    first = await sendRequestToGemini(
+      systemPrompt,
+      userPrompt,
+      apiKey,
+      model,
+      temperature,
+    );
+  } catch (error) {
+    throw attachDiagnostics(error, {
+      promptChars: promptChars(systemPrompt, userPrompt),
+    });
+  }
+  calls.push(first.info);
 
   try {
-    return validateTranslationResult(raw, 1, {
+    return validateTranslationResult(first.data, 1, {
       sourceTexts: [text],
       sourceLang,
       targetLang,
+      run: mergeRunInfo(calls),
     });
   } catch (error) {
     if (!isTranslationValidationError(error)) throw error;
 
     console.warn(
-      `[gemini:text] validation failed (${error.code}): ${error.message} — requesting correction`,
+      `[gemini:text] validation failed (${error.code}): ${error.message} - requesting correction`,
     );
-    const corrected = await sendRequestToGemini(
-      systemPrompt,
-      `${userPrompt}\n\nCORRECTION: ${error.message}\nReturn the full corrected JSON now.`,
-      apiKey,
-      model,
-      temperature,
-    );
-    return validateTranslationResult(corrected, 1, {
-      sourceTexts: [text],
-      sourceLang,
-      targetLang,
-    });
+    try {
+      const corrected = await sendRequestToGemini(
+        systemPrompt,
+        `${userPrompt}\n\nCORRECTION: ${error.message}\nReturn the full corrected JSON now.`,
+        apiKey,
+        model,
+        temperature,
+      );
+      calls.push(corrected.info);
+      return validateTranslationResult(corrected.data, 1, {
+        sourceTexts: [text],
+        sourceLang,
+        targetLang,
+        run: mergeRunInfo(calls),
+      });
+    } catch (retryError) {
+      throw attachDiagnostics(retryError, mergeRunInfo(calls));
+    }
   }
 }
 
@@ -155,13 +210,14 @@ export async function makeSiteRuleWithGemini(
 ) {
   const prompt = MAKE_SITE_RULE_PROMPT(title, path);
 
-  return sendRequestToGemini(
+  const { data } = await sendRequestToGemini(
     prompt.system,
     prompt.user,
     apiKey,
     model,
     temperature,
   );
+  return data;
 }
 
 export async function sendRequestToGemini(
@@ -174,7 +230,7 @@ export async function sendRequestToGemini(
     mimeType: string;
     data: string;
   },
-): Promise<any> {
+): Promise<{ data: any; info: LlmRunInfo }> {
   // Google API keys are printable ASCII. A key pasted with a stray space,
   // zero-width character or smart quote would otherwise reach the header and
   // make fetch() throw an opaque "invalid header value" TypeError.
@@ -228,5 +284,23 @@ export async function sendRequestToGemini(
     throw new Error("Gemini API returned empty response parts");
   }
 
-  return JSON.parse(resultText);
+  // Gemini reports STOP / MAX_TOKENS / SAFETY / ...; MAX_TOKENS is the cut
+  // signal the Debug export surfaces (LMT-032).
+  const finishReason: string | undefined = result.candidates?.[0]?.finishReason;
+  const info: LlmRunInfo = {
+    rawResponse: clipRawResponse(resultText),
+    finishReason: typeof finishReason === "string" ? finishReason : undefined,
+    promptChars: promptChars(systemPrompt, userPrompt),
+  };
+
+  try {
+    return { data: JSON.parse(resultText), info };
+  } catch (error) {
+    throw attachDiagnostics(
+      new Error(
+        `Gemini returned invalid JSON: ${(error as Error).message}`,
+      ),
+      info,
+    );
+  }
 }

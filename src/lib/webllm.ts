@@ -2,7 +2,16 @@ import type { MLCEngine } from "@mlc-ai/web-llm";
 import { DefaultConfig, normalizeLlmModel } from "./configs";
 import { createLlmEngine } from "./llm-engine";
 import { buildSiteRulePrompts, buildTranslationPrompts } from "./prompts";
-import { parseLlmJson, isTranslationValidationError, validateTranslationResult } from "./server/validator";
+import {
+  attachDiagnostics,
+  clipRawResponse,
+  isTranslationValidationError,
+  mergeRunInfo,
+  parseLlmJson,
+  promptChars,
+  validateTranslationResult,
+  type LlmRunInfo,
+} from "./server/validator";
 
 let globalEngine: MLCEngine | null = null;
 let currentlyLoadedModel: string | null = null;
@@ -14,6 +23,8 @@ export async function translateLocal(
   seriesContext?: SeriesContext,
   model = DefaultConfig.llmModels[0].id,
   temperature = DefaultConfig.llmTemperature,
+  /** Auto-Detect only: the script the OCR gate identified. */
+  detectedLabel?: string | null,
 ): Promise<TranslateResult> {
   const resolvedModel = normalizeLlmModel(model);
   if (!ocrResults || ocrResults.length === 0) {
@@ -25,21 +36,31 @@ export async function translateLocal(
     targetLang,
     sourceLang,
     seriesContext,
+    detectedLabel,
   );
 
-  const raw = await runLLMModel(
-    systemPrompt,
-    userPrompt,
-    schema,
-    resolvedModel,
-    temperature,
-  );
+  const calls: LlmRunInfo[] = [];
+  let raw: any;
+  try {
+    const first = await runLLMModel(
+      systemPrompt,
+      userPrompt,
+      schema,
+      resolvedModel,
+      temperature,
+    );
+    calls.push(first.info);
+    raw = first.data;
+  } catch (error) {
+    throw attachDiagnostics(error, mergeRunInfo(calls));
+  }
 
   try {
     return validateTranslationResult(raw, ocrResults.length, {
       sourceTexts: ocrResults,
       sourceLang,
       targetLang,
+      run: mergeRunInfo(calls),
     });
   } catch (error) {
     if (!isTranslationValidationError(error)) throw error;
@@ -47,18 +68,24 @@ export async function translateLocal(
     console.warn(
       `[webllm] validation failed (${error.code}): ${error.message} — requesting correction`,
     );
-    const corrected = await runLLMModel(
-      systemPrompt,
-      `${userPrompt}\n\nCORRECTION: ${error.message}\nReturn the full corrected JSON now.`,
-      schema,
-      resolvedModel,
-      temperature,
-    );
-    return validateTranslationResult(corrected, ocrResults.length, {
-      sourceTexts: ocrResults,
-      sourceLang,
-      targetLang,
-    });
+    try {
+      const corrected = await runLLMModel(
+        systemPrompt,
+        `${userPrompt}\n\nCORRECTION: ${error.message}\nReturn the full corrected JSON now.`,
+        schema,
+        resolvedModel,
+        temperature,
+      );
+      calls.push(corrected.info);
+      return validateTranslationResult(corrected.data, ocrResults.length, {
+        sourceTexts: ocrResults,
+        sourceLang,
+        targetLang,
+        run: mergeRunInfo(calls),
+      });
+    } catch (retryError) {
+      throw attachDiagnostics(retryError, mergeRunInfo(calls));
+    }
   }
 }
 
@@ -74,13 +101,14 @@ export async function makeSiteRuleLocal(
     path,
   );
 
-  return await runLLMModel(
+  const { data } = await runLLMModel(
     systemPrompt,
     userPrompt,
     schema,
     resolvedModel,
     temperature,
   );
+  return data;
 }
 
 async function runLLMModel(
@@ -89,7 +117,7 @@ async function runLLMModel(
   schema: object,
   model: string,
   temperature: number,
-) {
+): Promise<{ data: any; info: LlmRunInfo }> {
   if (!globalEngine) {
     globalEngine = createLlmEngine();
   }
@@ -116,10 +144,25 @@ async function runLLMModel(
     throw new Error("Local LLM returned empty response");
   }
 
+  // WebLLM reports OpenAI-style `finish_reason`; "length" means the answer hit
+  // `max_tokens` and was cut, which the Debug export must show (LMT-032).
+  const info: LlmRunInfo = {
+    rawResponse: clipRawResponse(content),
+    finishReason: reply.choices[0]?.finish_reason,
+    promptChars: promptChars(systemPrompt, userPrompt),
+  };
+
   try {
-    return parseLlmJson(content);
+    return { data: parseLlmJson(content), info };
   } catch (error) {
     console.error("Failed to parse LLM output:", content);
-    throw new Error(`Local LLM generated invalid JSON: ${(error as Error).message}`);
+    // Keep the raw answer reachable: a parse failure is the one case where the
+    // Debug export is the only way to see what the model actually wrote.
+    throw attachDiagnostics(
+      new Error(
+        `Local LLM generated invalid JSON: ${(error as Error).message}`,
+      ),
+      info,
+    );
   }
 }

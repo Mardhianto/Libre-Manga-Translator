@@ -6,6 +6,12 @@ export function buildTranslationPrompts(
   targetLang: string,
   sourceLang: string,
   seriesContext?: SeriesContext,
+  /**
+   * Script the OCR gate identified when `sourceLang` is "Auto-Detect".
+   * Without it the prompt claimed no source language at all, so
+   * the model had to guess the input language as well as translate it.
+   */
+  detectedLabel?: string | null,
 ) {
   const needsContext =
     !seriesContext?.summary ||
@@ -32,8 +38,19 @@ export function buildTranslationPrompts(
     ? `3. The "summary" and "dictionary" fields MUST remain strictly in ENGLISH to act as a system memory pivot.\n`
     : "";
 
+  // "Auto-Detect" is a UI choice, not a language: pass the script the gate
+  // actually identified so the model is not asked to guess the input language
+  // as well. When nothing was identified, say that plainly instead
+  // of dropping the clause and implying the input is English.
+  const autoDetected = sourceLang === "Auto-Detect";
+  const sourceClause = autoDetected
+    ? detectedLabel
+      ? ` FROM ${detectedLabel.toUpperCase()} (auto-detected script)`
+      : " FROM the source language of the text in each box"
+    : ` FROM ${sourceLang.toUpperCase()}`;
+
   const systemPrompt = `You are a professional manga translator${seriesContext?.seriesName ? ` working on "${seriesContext.seriesName}"` : ""}.
-Your task is to translate extracted manga dialogue${sourceLang !== "Auto-Detect" ? ` FROM ${sourceLang.toUpperCase()}` : ""} INTO ${targetLang.toUpperCase()}.
+Your task is to translate extracted manga dialogue${sourceClause} INTO ${targetLang.toUpperCase()}.
 Maintain the tone, emotion, and context of the scene.
 ${seriesContext?.summary ? `\nSeries context: ${seriesContext.summary}` : ""}
 ${seriesContext?.dictionary ? `\nTerm dictionary (always use these): ${seriesContext.dictionary}` : ""}
