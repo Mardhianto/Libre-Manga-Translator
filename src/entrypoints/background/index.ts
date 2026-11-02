@@ -6,6 +6,7 @@ import { DefaultConfig, SUPPORTED_LANG_GROUPS, normalizeDetectionModel, resolveL
 import { UNKNOWN_DETECTION_MODEL_MESSAGE } from "@/lib/detections/main";
 import { testServerConnection } from "@/lib/server/main";
 import { createAsyncResponder, keepAliveWhile, withTimeout } from "./messaging";
+import { resolveJobGuardTimeout, resolveJobTimeout } from "@/lib/timeouts";
 import { isAllowedImageUrl } from "@/lib/security";
 
 /**
@@ -473,27 +474,22 @@ export default defineBackground(() => {
         msg.type,
       )
     ) {
-      // Quality (LaMa) runs on wasm CPU (~30s+ per 512px tile), so a Quality
-      // inpaint over N regions needs a per-region budget, not a flat page budget.
-      const inpaintBoxes = Array.isArray(msg.data?.bboxes)
-        ? msg.data.bboxes.length
-        : 0;
-      const isLocalTranslate =
-        msg.type === "TRANSLATE_IMAGE" &&
-        (msg.config?.currentMode === "webgpu" || !msg.config?.currentMode);
-      const timeoutMs =
-        msg.type === "INPAINT_IMAGE" && msg.data?.method === "quality"
-          ? Math.max(300_000, inpaintBoxes * 60_000)
-          : isLocalTranslate
-            ? 480_000
-          : msg.type === "TRANSLATE_IMAGE" || msg.type === "INPAINT_IMAGE"
-            ? 180_000
-            : 90_000;
+      const timeoutMs = resolveJobTimeout({
+        type: msg.type,
+        mode: msg.config?.currentMode,
+        boxes: Array.isArray(msg.data?.bboxes) ? msg.data.bboxes.length : 0,
+        method: msg.data?.method,
+      });
 
+      // The offscreen document owns the deadline and aborts the request when
+      // it passes (LMT-010). This guard exists only for the case where the
+      // document died mid-job and never replies; it must therefore start
+      // after the real deadline, so a healthy slow job is never released early.
       const forward = () =>
         browser.runtime.sendMessage({
           ...msg,
           type: `OFFSCREEN_${msg.type}`,
+          timeoutMs,
         });
 
       const run = async () => {
@@ -508,8 +504,9 @@ export default defineBackground(() => {
                 await ensureOffscreen();
                 return forward();
               }),
-            timeoutMs,
+            resolveJobGuardTimeout(timeoutMs),
             msg.type,
+            timeoutMs,
           );
         } finally {
           release();

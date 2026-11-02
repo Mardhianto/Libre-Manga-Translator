@@ -23,7 +23,12 @@ export async function translateWithGemini(
   temperature = DefaultConfig.llmTemperature,
   /** Auto-Detect only: the script the OCR gate identified (LMT-030). */
   detectedLabel?: string | null,
+  /** Cancels the in-flight request at the job deadline (LMT-010). */
+  signal?: AbortSignal,
 ): Promise<TranslateResult> {
+  // An aborted job must not pay for the (expensive) image conversion or open a
+  // socket; the caller's reason carries the stage name.
+  signal?.throwIfAborted();
   const cleanBase64 = (await drawNumberedBboxes(imageSrc, bboxes)).replace(
     /^data:image\/(png|jpeg|webp);base64,/,
     "",
@@ -87,6 +92,7 @@ ${
         mimeType: "image/jpeg",
         data: cleanBase64,
       },
+      signal,
     );
   } catch (error) {
     throw attachDiagnostics(error, {
@@ -118,6 +124,7 @@ ${
           mimeType: "image/jpeg",
           data: cleanBase64,
         },
+        signal,
       );
       calls.push(corrected.info);
       return validateTranslationResult(corrected.data, bboxes.length, {
@@ -141,6 +148,8 @@ export async function translateTextWithGemini(
   temperature = DefaultConfig.llmTemperature,
   /** Auto-Detect only: the script the OCR gate identified (LMT-030). */
   detectedLabel?: string | null,
+  /** Cancels the in-flight request at the job deadline (LMT-010). */
+  signal?: AbortSignal,
 ): Promise<TranslateResult> {
   const { systemPrompt, userPrompt } = buildTranslationPrompts(
     [text],
@@ -159,6 +168,8 @@ export async function translateTextWithGemini(
       apiKey,
       model,
       temperature,
+      undefined,
+      signal,
     );
   } catch (error) {
     throw attachDiagnostics(error, {
@@ -187,6 +198,8 @@ export async function translateTextWithGemini(
         apiKey,
         model,
         temperature,
+        undefined,
+        signal,
       );
       calls.push(corrected.info);
       return validateTranslationResult(corrected.data, 1, {
@@ -207,6 +220,7 @@ export async function makeSiteRuleWithGemini(
   apiKey: string,
   model = DefaultConfig.geminiModels[0].id,
   temperature = DefaultConfig.llmTemperature,
+  signal?: AbortSignal,
 ) {
   const prompt = MAKE_SITE_RULE_PROMPT(title, path);
 
@@ -216,6 +230,8 @@ export async function makeSiteRuleWithGemini(
     apiKey,
     model,
     temperature,
+    undefined,
+    signal,
   );
   return data;
 }
@@ -230,6 +246,8 @@ export async function sendRequestToGemini(
     mimeType: string;
     data: string;
   },
+  /** Cancels the in-flight request at the job deadline (LMT-010). */
+  signal?: AbortSignal,
 ): Promise<{ data: any; info: LlmRunInfo }> {
   // Google API keys are printable ASCII. A key pasted with a stray space,
   // zero-width character or smart quote would otherwise reach the header and
@@ -269,6 +287,7 @@ export async function sendRequestToGemini(
         responseMimeType: "application/json",
       },
     }),
+    signal,
   });
 
   if (!response.ok) {
