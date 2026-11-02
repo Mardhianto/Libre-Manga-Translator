@@ -39,6 +39,20 @@
   let isDraggingTrigger = $state(false);
   let triggerDragStart: { mouseX: number; mouseY: number; initialX: number; initialY: number } | null = null;
 
+  // Cached reader container element — resolved lazily from the selector prop
+  // so isPageLike doesn't call closest() on every candidate every mouseover.
+  let cachedContainer: Element | null | undefined = undefined;
+  function getReaderContainer(): Element | null {
+    if (cachedContainer !== undefined) return cachedContainer;
+    if (!readerContainerSelector) { cachedContainer = null; return null; }
+    try {
+      cachedContainer = document.querySelector(readerContainerSelector);
+    } catch {
+      cachedContainer = null;
+    }
+    return cachedContainer;
+  }
+
   try {
     const saved = localStorage.getItem("lmt-trigger-pos");
     if (saved) {
@@ -116,16 +130,16 @@
   function isPageLike(el: MangaTargetElement) {
     const w = el.offsetWidth || el.clientWidth;
     const h = el.offsetHeight || el.clientHeight;
+    // Skip hidden/zero-size elements (MangaDex hides non-current pages with
+    // display:none — skipping them here avoids iterating 98 hidden images).
+    if (w === 0 && h === 0) return false;
     // Thumbnails and icons: never indirect-map to images narrower than 350px,
     // regardless of occupancy (covers 280-320px range often seen in nav cards).
     if (w < 350 || h < 280) return false;
     if (el.closest(INTERACTIVE_SELECTOR)) return false;
-    if (readerContainerSelector) {
-      try {
-        if (el.closest(readerContainerSelector)) return w >= 180 && h >= 180;
-      } catch {
-        // invalid selector from a custom rule — fall through to geometry
-      }
+    const container = getReaderContainer();
+    if (container) {
+      if (container.contains(el)) return w >= 180 && h >= 180;
     }
     const vpArea = (window.innerWidth || 1) * (window.innerHeight || 1);
     return (w * h) / vpArea >= 0.12;
@@ -203,13 +217,13 @@
 
   function showFor(img: MangaTargetElement, auto: boolean) {
     cancelHide();
+    // Only clear manual drag offset when the pill switches to a genuinely
+    // different image — re-showing the same image after scroll-hide or
+    // re-hover should preserve the user's drag position.
+    const switched = targetImg !== img;
     targetImg = img;
     if (auto) autoImg = img;
-    // Clear manual drag offset when the pill switches to a different image
-    // (hovering/auto-queue) — pill should snap to the new image's position.
-    // Dragging the pill itself sets isDraggingTrigger=true, so this won't
-    // interfere with active drags.
-    if (!isDraggingTrigger) dragOffset = null;
+    if (switched && !isDraggingTrigger) dragOffset = null;
     updatePosition();
     visible = true;
     if (adoptMode(img) === "translated") {
@@ -343,64 +357,103 @@
   }
 
   onMount(() => {
-    function handleMouseOver(e: MouseEvent) {
-      const target = e.target;
-      let el: MangaTargetElement | null = null;
-      if (isMangaElement(target) && meetsThreshold(target)) {
-        // Direct hover on a page image — always honored, no page-like gate
-        // (small zoomed-out pages and linked reader images must still work).
-        el = target;
-      } else if (
-        target instanceof HTMLElement &&
-        !target.closest(OWN_UI_SELECTOR)
-      ) {
-        for (const child of target.querySelectorAll<MangaTargetElement>(
-          "canvas, img",
-        )) {
-          if (
-            meetsThreshold(child) &&
-            isPageLike(child) &&
-            fillsWrapper(child, target)
-          ) {
-            el = child;
-            break;
-          }
-        }
-        if (!el) {
-          // Transparent tap overlays: inspect underlying elements
-          const hits = document.elementsFromPoint(e.clientX, e.clientY);
-          for (const hit of hits) {
-            if (isMangaElement(hit) && meetsThreshold(hit) && isPageLike(hit)) {
-              el = hit;
-              break;
-            }
-          }
-        }
-      }
+    // rAF handle for debounced indirect mapping — coalesces rapid
+    // mouseover events that don't land directly on img/canvas.
+    let indirectRaf = 0;
 
-      if (!el || !document.body.contains(el)) {
-        // Un-mappable hover (nav cards, text, chrome). A pill established via
-        // descendant/underlying mapping never gets a mouseout from the mapped
-        // image itself, so schedule the hide here instead of stranding it.
-        if (
-          targetImg &&
-          targetImg !== autoImg &&
-          hoverImg &&
-          !(target instanceof Element && target.closest(OWN_UI_SELECTOR))
-        ) {
-          hoverImg = null;
-          scheduleHide();
-        }
-        return;
-      }
+    function applyHoverTarget(el: MangaTargetElement) {
       hoverImg = el;
       cancelHide();
       if (targetImg !== el) {
         showFor(el, false);
       } else {
-        // Hovering the retained target after a scroll-hide: bring it back.
         visible = true;
         adoptMode(el);
+      }
+    }
+
+    // Expensive path: querySelectorAll + elementsFromPoint, called at
+    // most once per animation frame via rAF debounce.
+    function resolveIndirect(target: HTMLElement, clientX: number, clientY: number) {
+      let el: MangaTargetElement | null = null;
+      for (const child of target.querySelectorAll<MangaTargetElement>(
+        "canvas, img",
+      )) {
+        if (
+          meetsThreshold(child) &&
+          isPageLike(child) &&
+          fillsWrapper(child, target)
+        ) {
+          el = child;
+          break;
+        }
+      }
+      if (!el) {
+        // Transparent tap overlays: inspect underlying elements
+        const hits = document.elementsFromPoint(clientX, clientY);
+        for (const hit of hits) {
+          if (isMangaElement(hit) && meetsThreshold(hit) && isPageLike(hit)) {
+            el = hit;
+            break;
+          }
+        }
+      }
+      if (el && document.body.contains(el)) {
+        applyHoverTarget(el);
+      } else if (
+        targetImg &&
+        targetImg !== autoImg &&
+        hoverImg &&
+        !target.closest(OWN_UI_SELECTOR)
+      ) {
+        hoverImg = null;
+        scheduleHide();
+      }
+    }
+
+    function handleMouseOver(e: MouseEvent) {
+      const target = e.target;
+
+      // ── Fast path: direct hover on img/canvas ──
+      // This is the common case for standard readers like MangaDex where
+      // <img> elements receive mouseover directly. No page-like gate —
+      // small zoomed-out pages and linked reader images must still work.
+      if (isMangaElement(target) && meetsThreshold(target)) {
+        if (indirectRaf) { cancelAnimationFrame(indirectRaf); indirectRaf = 0; }
+        applyHoverTarget(target);
+        return;
+      }
+
+      // ── Indirect path: debounce to next animation frame ──
+      // Readers with tap overlays or canvas wrappers need querySelectorAll +
+      // elementsFromPoint, which is expensive when the container has many
+      // children (MangaDex preloads ~99 img elements). Deferring to rAF
+      // coalesces rapid mouseover cascades into a single resolution.
+      if (
+        target instanceof HTMLElement &&
+        !target.closest(OWN_UI_SELECTOR)
+      ) {
+        const cx = e.clientX, cy = e.clientY;
+        const hoveredEl = target;
+        if (indirectRaf) cancelAnimationFrame(indirectRaf);
+        indirectRaf = requestAnimationFrame(() => {
+          indirectRaf = 0;
+          resolveIndirect(hoveredEl, cx, cy);
+        });
+        return;
+      }
+
+      // Hover inside own UI — ignore
+      if (target instanceof Element && target.closest(OWN_UI_SELECTOR)) return;
+
+      // Un-mappable hover on non-HTMLElement — schedule hide for stale pill
+      if (
+        targetImg &&
+        targetImg !== autoImg &&
+        hoverImg
+      ) {
+        hoverImg = null;
+        scheduleHide();
       }
     }
 
@@ -424,22 +477,28 @@
     // targetImg/autoImg and the translating pin so scrolling back restores
     // it); in-view images only re-show it when the pill is still owned —
     // hovered or pipeline-pinned — never for stale indirect mappings.
-    function handleScroll() {
+    let scrollRaf = 0;
+    function handleScrollRaw() {
       if (!targetImg) return;
-      if (!document.body.contains(targetImg)) {
-        visible = false;
-        targetImg = null;
-        return;
-      }
-      if (isInViewport(targetImg)) {
-        if (hoverImg === targetImg || autoImg === targetImg) {
-          visible = true;
-          updatePosition();
+      if (scrollRaf) return;
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = 0;
+        if (!targetImg) return;
+        if (!document.body.contains(targetImg)) {
+          visible = false;
+          targetImg = null;
+          return;
         }
-      } else {
-        visible = false;
-        if (targetImg !== autoImg && hoverImg !== targetImg) targetImg = null;
-      }
+        if (isInViewport(targetImg)) {
+          if (hoverImg === targetImg || autoImg === targetImg) {
+            visible = true;
+            updatePosition();
+          }
+        } else {
+          visible = false;
+          if (targetImg !== autoImg && hoverImg !== targetImg) targetImg = null;
+        }
+      });
     }
 
     function handleModeChange(e: Event) {
@@ -504,11 +563,11 @@
 
     document.addEventListener("mouseover", handleMouseOver, { passive: true });
     document.addEventListener("mouseout", handleMouseOut, { passive: true });
-    window.addEventListener("resize", handleScroll, { passive: true });
+    window.addEventListener("resize", handleScrollRaw, { passive: true });
     // Capture on document: `scroll` does not bubble, and many readers (Sunday
     // Webry included) scroll an inner container — window-only listeners never
     // fired for those, so the pill stayed pinned off-screen.
-    document.addEventListener("scroll", handleScroll, { passive: true, capture: true });
+    document.addEventListener("scroll", handleScrollRaw, { passive: true, capture: true });
     document.addEventListener("lmt:mode-change", handleModeChange, { passive: true });
     document.addEventListener("lmt:progress", handleProgress, { passive: true });
     document.addEventListener("lmt:translation-status", handleTranslationStatus, { passive: true });
@@ -516,12 +575,14 @@
     return () => {
       document.removeEventListener("mouseover", handleMouseOver);
       document.removeEventListener("mouseout", handleMouseOut);
-      window.removeEventListener("resize", handleScroll);
-      document.removeEventListener("scroll", handleScroll, true);
+      window.removeEventListener("resize", handleScrollRaw);
+      document.removeEventListener("scroll", handleScrollRaw, true);
       document.removeEventListener("lmt:mode-change", handleModeChange);
       document.removeEventListener("lmt:progress", handleProgress);
       document.removeEventListener("lmt:translation-status", handleTranslationStatus);
       cancelHide();
+      if (indirectRaf) { cancelAnimationFrame(indirectRaf); indirectRaf = 0; }
+      if (scrollRaf) { cancelAnimationFrame(scrollRaf); scrollRaf = 0; }
     };
   });
 

@@ -23,6 +23,7 @@ import {
   type MangaTargetElement,
 } from "./utils";
 import { getElementSrc } from "@/lib/canvas";
+import { maskUntranslated } from "@/lib/server/validator";
 import "@/assets/app.css";
 
 const srcKey = (src: string) =>
@@ -549,8 +550,14 @@ export default defineContentScript({
                     return resp;
                   }
 
-                  const { translations, context, sourceTexts, gateSkip, gate, llmPerf, gpuUnavailableReason } =
+                  const { translations, context, sourceTexts, gateSkip, gate, llmPerf, gpuUnavailableReason, diagnostics } =
                     resp;
+                  // Echoed boxes keep the original pixels: masking them to ""
+                  // means the renderer neither inpaints nor paints them.
+                  const visibleTranslations = maskUntranslated(
+                    translations,
+                    diagnostics?.untranslated,
+                  );
                   const timing = {
                     total: duration,
                     detect: lastDetectMs,
@@ -586,6 +593,7 @@ export default defineContentScript({
                     bboxCount: bboxes.length,
                     sourceTexts,
                     translations,
+                    untranslated: diagnostics?.untranslated,
                     timing,
                     ...(curMode === "webgpu" && llmPerf
                       ? {
@@ -618,7 +626,9 @@ export default defineContentScript({
                   storage
                     .setItem<PageCache>(`local:${cacheKey}`, {
                       bboxes,
-                      translations,
+                      // Persist the paintable set so a cache hit cannot
+                      // resurrect an echoed source line.
+                      translations: visibleTranslations,
                       sourceTexts,
                     })
                     .catch((err) => console.warn("LMT: page-cache persist failed:", err));
@@ -628,12 +638,13 @@ export default defineContentScript({
                     seriesName,
                     chapterId,
                     resolvedPage,
-                    translations,
+                    // Never feed an echoed source line into the next prompt.
+                    visibleTranslations,
                     context,
                   ).catch((err) => console.warn("LMT: series-context update failed:", err));
                 }
 
-                  return { translations, sourceTexts, context, gateSkip, gate };
+                  return { translations: visibleTranslations, sourceTexts, context, gateSkip, gate, diagnostics };
                 },
 
                 // Re-render translations on top of the (cached) inpainted base.

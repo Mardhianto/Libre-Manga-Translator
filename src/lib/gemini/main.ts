@@ -2,7 +2,7 @@ import { MAKE_SITE_RULE_PROMPT } from "../adapters";
 import { DefaultConfig } from "../configs";
 import { drawNumberedBboxes } from "./utils";
 import { buildTranslationPrompts } from "../prompts";
-import { validateTranslationResult } from "../server/validator";
+import { isTranslationValidationError, validateTranslationResult } from "../server/validator";
 
 export async function translateWithGemini(
   imageSrc: string,
@@ -66,7 +66,33 @@ ${
     },
   );
 
-  return validateTranslationResult(raw, bboxes.length);
+  try {
+    return validateTranslationResult(raw, bboxes.length, {
+      sourceLang,
+      targetLang,
+    });
+  } catch (error) {
+    if (!isTranslationValidationError(error)) throw error;
+
+    console.warn(
+      `[gemini] validation failed (${error.code}): ${error.message} — requesting correction`,
+    );
+    const corrected = await sendRequestToGemini(
+      systemPrompt,
+      `${userPrompt}\n\nCORRECTION: ${error.message}\nReturn the full corrected JSON now.`,
+      apiKey,
+      model,
+      temperature,
+      {
+        mimeType: "image/jpeg",
+        data: cleanBase64,
+      },
+    );
+    return validateTranslationResult(corrected, bboxes.length, {
+      sourceLang,
+      targetLang,
+    });
+  }
 }
 
 export async function translateTextWithGemini(
@@ -93,7 +119,31 @@ export async function translateTextWithGemini(
     temperature,
   );
 
-  return validateTranslationResult(raw, 1);
+  try {
+    return validateTranslationResult(raw, 1, {
+      sourceTexts: [text],
+      sourceLang,
+      targetLang,
+    });
+  } catch (error) {
+    if (!isTranslationValidationError(error)) throw error;
+
+    console.warn(
+      `[gemini:text] validation failed (${error.code}): ${error.message} — requesting correction`,
+    );
+    const corrected = await sendRequestToGemini(
+      systemPrompt,
+      `${userPrompt}\n\nCORRECTION: ${error.message}\nReturn the full corrected JSON now.`,
+      apiKey,
+      model,
+      temperature,
+    );
+    return validateTranslationResult(corrected, 1, {
+      sourceTexts: [text],
+      sourceLang,
+      targetLang,
+    });
+  }
 }
 
 export async function makeSiteRuleWithGemini(

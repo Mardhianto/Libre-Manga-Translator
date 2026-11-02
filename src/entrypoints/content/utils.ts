@@ -164,12 +164,15 @@ export async function updateSeriesContext(
   stored.lastChapterId = chapterId;
   stored.lastPageIndex = pageIndex;
 
-  // Push the new history object into the buffer
-  const formattedText = translations.join(" | ");
-  stored.recentHistory = [
-    ...stored.recentHistory.slice(-4),
-    { chapterId, pageIndex, text: formattedText },
-  ];
+  // Push the new history object into the buffer. Masked/echoed boxes are
+  // empty strings, so drop them instead of writing " | " noise.
+  const formattedText = translations.filter((t) => t.trim().length > 0).join(" | ");
+  stored.recentHistory = formattedText
+    ? [
+        ...stored.recentHistory.slice(-4),
+        { chapterId, pageIndex, text: formattedText },
+      ]
+    : stored.recentHistory;
 
   await storage.setItem(`sync:context-${seriesName}`, stored);
 }

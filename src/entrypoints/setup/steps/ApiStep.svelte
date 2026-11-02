@@ -33,8 +33,8 @@
     {
       id: "lmstudio",
       name: "LM Studio",
-      defaultHost: "http://localhost:1234/v1",
-      defaultSchema: "openai",
+      defaultHost: "http://localhost:1234/api/v1",
+      defaultSchema: "lmstudio",
       defaultModel: "",
       requiresApiKey: false,
       noteKey: "lmstudio",

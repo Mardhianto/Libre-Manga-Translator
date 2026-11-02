@@ -62,6 +62,14 @@ interface PageCache {
   cleanedSrc?: string;
 }
 
+interface TranslationDiagnostics {
+  expectedCount: number;
+  receivedCount: number;
+  /** Box indices whose output echoed the source; masked before rendering. */
+  untranslated: number[];
+  clean: boolean;
+}
+
 interface TranslateResult {
   translations: Translations;
   sourceTexts?: string[];
@@ -80,6 +88,7 @@ interface LlmPerf {
   promptTps?: number;
   genTps?: number;
   totalMs?: number;
+  diagnostics?: TranslationDiagnostics;
 }
 
 interface DebugEntry {
@@ -96,6 +105,7 @@ interface DebugEntry {
   bboxCount: number;
   sourceTexts?: string[];
   translations?: string[];
+  untranslated?: number[];
   timing: {
     detect?: number;
     ocr?: number;

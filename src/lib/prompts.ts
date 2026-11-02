@@ -66,7 +66,7 @@ ${
     : ""
 }`;
 
-  const schema = JSON.stringify({
+  const schema = {
     type: "object",
     properties: {
       translations: {
@@ -84,19 +84,21 @@ ${
                 dictionary: { type: "string" },
               },
               required: ["summary", "dictionary"],
+              additionalProperties: false,
             },
           }
         : {}),
     },
     required: ["translations", ...(needsContext ? ["context"] : [])],
-  });
+    additionalProperties: false,
+  };
 
   return { systemPrompt, userPrompt, schema, needsContext };
 }
 
 export function buildSiteRulePrompts(title: string, path: string) {
   const prompt = MAKE_SITE_RULE_PROMPT(title, path);
-  const schema = JSON.stringify({
+  const schema = {
     type: "object",
     properties: {
       seriesName: {
@@ -106,6 +108,7 @@ export function buildSiteRulePrompts(title: string, path: string) {
           source: { type: "string" },
         },
         required: ["regex", "source"],
+        additionalProperties: false,
       },
       chapterId: {
         type: "object",
@@ -114,6 +117,7 @@ export function buildSiteRulePrompts(title: string, path: string) {
           source: { type: "string" },
         },
         required: ["regex", "source"],
+        additionalProperties: false,
       },
       pageIndex: {
         type: "object",
@@ -122,10 +126,12 @@ export function buildSiteRulePrompts(title: string, path: string) {
           source: { type: "string" },
         },
         required: ["regex", "source"],
+        additionalProperties: false,
       },
     },
     required: ["seriesName", "chapterId", "pageIndex"],
-  });
+    additionalProperties: false,
+  };
 
   return { systemPrompt: prompt.system, userPrompt: prompt.user, schema };
 }

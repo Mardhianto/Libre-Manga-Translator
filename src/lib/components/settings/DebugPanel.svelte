@@ -268,6 +268,14 @@
               {/if}
             </button>
             <span>{log.bboxCount}b</span>
+            {#if log.untranslated?.length}
+              <span
+                class="text-[var(--accent-amber)]"
+                title="Boxes whose output echoed the source"
+              >
+                {log.untranslated.length} echo
+              </span>
+            {/if}
             <span>{formatDuration(log.timing?.total)}</span>
           </div>
         </div>
@@ -312,6 +320,11 @@
                   title="{log.gpuUnavailableReason}"
                 >
                   GPU unavailable: {log.gpuUnavailableReason}
+                </div>
+              {/if}
+              {#if log.untranslated?.length}
+                <div class="col-span-2 text-[var(--accent-amber)]">
+                  Untranslated boxes: {log.untranslated.map((i) => i + 1).join(", ")}
                 </div>
               {/if}
             </div>

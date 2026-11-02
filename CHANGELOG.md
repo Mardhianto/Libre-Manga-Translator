@@ -1,5 +1,43 @@
 # Changelog
 
+## v1.0.4 — November 2026
+
+Firefox compatibility enhancements, canvas support for manga readers, improved overlay interaction, and reliability fixes across the translation pipeline.
+
+### Added
+
+- **Canvas-based manga reader support:** Native support for canvas-based readers with proper event handling and text wrapping fixes (Sunday Webry)
+- **Free-dragging toolbars:** Interactive drag handles on result toolbars positioned at bottom-left corner for customizable workspace layout
+- **Improved LLM model management:** Enhanced caching and download management in setup wizard with better progress tracking
+- **Automatic config save:** Configuration automatically saved on component destruction (popup and sidebar) to prevent data loss
+- **GPU denylist test coverage:** Strengthened documentation tests for GPU compatibility verification
+
+### Changed
+
+- **Translation registry improvements:** Refined concurrency handling in content scripts for more stable multi-page operations
+- **Overlay hover mapping:** Enhanced positioning and mapping logic for floating trigger components
+- **Text fit algorithms:** Improved line wrapping for CJK characters in canvas-rendered content
+- **Model select UI:** Firefox-specific adjustments for model selection dropdown behavior
+- **Offscreen document messaging:** Optimized background communication patterns for cross-origin contexts
+
+### Fixed
+
+- **ORT concurrency issues:** Fixed ONNX Runtime thread pool conflicts in canvas environments
+- **Site adapters:** Updated Sunday Webry adapter with proper selector and event handling
+- **Bubble editor interactions:** Improved retranslation functionality with toast feedback
+- **Configuration persistence:** Ensured LLM model selections are correctly saved during setup wizard flow
+- **Event propagation:** Proper cleanup of overlay events to prevent double-triggering in content scripts
+
+### Technical
+
+- Added `untaint.content.ts` for safer canvas manipulation and DOM integrity preservation
+- Enhanced export utilities with improved canvas-to-JPEG conversion
+- Upgraded detection main module with refined concurrency controls
+- Streamlined OCR engine interfaces (Paddle, Pororo, Manga-OCR) for consistent error handling
+- Improved debug panel visibility and debugging capabilities
+
+This release includes first contributions from @justoy via PR #7.
+
 ## v1.0.3 — October 24, 2026
 
 API Mode runner presets, sliding-window detection tiling for tall webtoons, Firefox 2GB streaming fix, and pipeline hardening across OCR, inpainting, and Gemini key transport.
