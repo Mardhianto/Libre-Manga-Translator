@@ -379,7 +379,7 @@ export async function translateWithWllama(
   const { parsed, llmPerf } = await runWllamaModel(
     systemPrompt,
     userPrompt,
-    schema,
+    JSON.stringify(schema),
     def,
     temperature,
   );
@@ -405,7 +405,7 @@ export async function makeSiteRuleWithWllama(
   const { parsed } = await runWllamaModel(
     systemPrompt,
     userPrompt,
-    schema,
+    JSON.stringify(schema),
     def,
     temperature,
   );

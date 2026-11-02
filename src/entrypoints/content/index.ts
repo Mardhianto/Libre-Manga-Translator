@@ -529,7 +529,7 @@ export default defineContentScript({
                         ocrMinConfidence: debugCtx.ocrMinConfidence,
                         detectionMinConfidence: debugCtx.detectionMinConfidence,
                         temperature: debugCtx.temperature,
-                        serverSchema: debugCtx.serverSchema,
+                        serverSchema: curMode === "api" ? debugCtx.serverSchema : undefined,
                         geminiModel:
 
                           curMode === "gemini" ? debugCtx.geminiModel : undefined,
@@ -607,7 +607,7 @@ export default defineContentScript({
                     ocrMinConfidence: debugCtx.ocrMinConfidence,
                     detectionMinConfidence: debugCtx.detectionMinConfidence,
                     temperature: debugCtx.temperature,
-                    serverSchema: debugCtx.serverSchema,
+                    serverSchema: curMode === "api" ? debugCtx.serverSchema : undefined,
                     geminiModel:
                       curMode === "gemini" ? debugCtx.geminiModel : undefined,
                     models: {

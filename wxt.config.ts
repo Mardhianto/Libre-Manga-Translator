@@ -104,15 +104,7 @@ export default defineConfig({
       gecko: {
         id: "libre-manga-translator@mrdhnto",
       },
-    },
-    ...(browser === "firefox" && {
-      browser_specific_settings: {
-        gecko: {
-          id: "libremangatranslator@lmt.tmp",
-          strict_min_version: "148.0",
-        },
-      },
-    }),
+    }
   }),
 
   srcDir: "src",
