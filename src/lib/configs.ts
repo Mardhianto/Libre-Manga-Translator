@@ -83,6 +83,29 @@ export const DefaultConfig = {
   serverMaxRetries: 1,
   serverRetryDelayMs: 2000,
 
+  // Per-job execution budgets (ms) for work forwarded to the offscreen
+  // document (LMT-010 / LMT-027). The offscreen document owns the clock and
+  // aborts the request at the deadline, so a slow page is actually cancelled
+  // instead of merely abandoned; the background service worker only mounts a
+  // last-resort guard `timeoutGuardGraceMs` later. Resolution lives in
+  // `timeouts.ts` so the numbers stay unit-testable.
+  timeoutShortJobMs: 90_000,
+  timeoutLocalTranslateMs: 480_000,
+  timeoutApiTranslateMs: 180_000,
+  /**
+   * Budget added per text region for API translation. A dense page spends one
+   * inference round-trip on the answer plus one on the correction, so a flat
+   * page budget cut off pages that were still generating.
+   */
+  timeoutApiTranslatePerBoxMs: 15_000,
+  timeoutGeminiTranslateMs: 180_000,
+  timeoutInpaintMs: 180_000,
+  /** LaMa runs on wasm CPU (~30s+ per 512px tile) - budget per region. */
+  timeoutQualityInpaintMs: 300_000,
+  timeoutQualityInpaintPerBoxMs: 60_000,
+  /** Extra time the background waits past the offscreen deadline. */
+  timeoutGuardGraceMs: 5_000,
+
   detectionMinConfidence: 0.5,
   skipBboxRefining: false,
   autoTranslate: false,

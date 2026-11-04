@@ -58,6 +58,76 @@ function errorResponse(err: unknown) {
   };
 }
 
+/**
+ * Per-job execution deadline, owned by the context that actually runs the
+ * request (LMT-010).
+ *
+ * The background service worker cannot cancel a `fetch` living in this
+ * document, so it only forwards the budget and keeps a later last-resort guard
+ * for the case where this document died. Aborting here is what closes the
+ * socket / ends the decode loop while the slot is still held.
+ */
+function jobDeadline(
+  timeoutMs: unknown,
+  stage: string,
+): { signal?: AbortSignal; dispose: () => void } {
+  if (typeof timeoutMs !== "number" || !(timeoutMs > 0)) {
+    return { dispose: () => {} };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(
+      new DOMException(
+        `Timed out after ${Math.round(timeoutMs / 1000)}s: ${stage}`,
+        "AbortError",
+      ),
+    );
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    dispose: () => clearTimeout(timer),
+  };
+}
+
+function stageName(type: unknown): string {
+  return String(type ?? "JOB").replace(/^OFFSCREEN_/, "");
+}
+
+/**
+ * `fetch` and WebLLM reject with their own generic abort text ("The user
+ * aborted a request"), which drops the stage name. When the deadline is what
+ * fired, rewrite the error so the user sees the same "Timed out after Ns:
+ * STAGE" line the background guard produces.
+ *
+ * The raw answer and call count a backend already attached (LMT-032) must
+ * survive the rewrite, or a timed-out page loses the very facts that explain
+ * it.
+ */
+function timedOutError(
+  err: unknown,
+  signal: AbortSignal | undefined,
+  timeoutMs: unknown,
+  stage: string,
+): unknown {
+  const isAbort = (err as Error | undefined)?.name === "AbortError";
+  if (!signal?.aborted || !isAbort) return err;
+  if (typeof timeoutMs !== "number") return err;
+  const timeout = new DOMException(
+    `Timed out after ${Math.round(timeoutMs / 1000)}s: ${stage}`,
+    "AbortError",
+  );
+  const run = (err as { lmtDiagnostics?: unknown }).lmtDiagnostics;
+  if (run !== undefined) {
+    Object.defineProperty(timeout, "lmtDiagnostics", {
+      value: run,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return timeout;
+}
+
 browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
   if (msg.type === "OFFSCREEN_DETECT_BBOX") {
     const { detectionModel, detectionMinConfidence } = msg.config;
@@ -97,41 +167,61 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
       force: gateForce ?? false,
     };
 
+    /**
+     * Runs one translate branch under the forwarded deadline and replies with
+     * exactly one response. The signal reaches the backend that owns the
+     * request, so the deadline actually closes the socket / interrupts
+     * generation instead of only abandoning the promise (LMT-010).
+     */
+    const runTranslation = (
+      stage: string,
+      task: (signal?: AbortSignal) => Promise<unknown>,
+    ) => {
+      const deadline = jobDeadline(msg.timeoutMs, stage);
+      task(deadline.signal)
+        .then(sendResponse)
+        .catch((err) =>
+          sendResponse(
+            errorResponse(
+              timedOutError(err, deadline.signal, msg.timeoutMs, stage),
+            ),
+          ),
+        )
+        .finally(deadline.dispose);
+    };
+
     if (typeof rawText === "string") {
       if (currentMode === "webgpu") {
-        (async () => {
+        runTranslation(stageName(msg.type), async (signal) => {
           await yieldToMain();
           const tTrans = performance.now();
           const backend = await detectBackend();
           if (backend === "wasm") {
-            sendResponse({
+            return {
               error:
                 "Local AI requires WebGPU — not available in this context. Check chrome://gpu or switch to Gemini / API mode.",
-            });
-            return;
+            };
           }
-          try {
-            const res = await translateLocal(
-              [rawText],
-              targetLang,
-              sourceLang,
-              seriesContext,
-              llmModel,
-              llmTemperature,
-            );
-            sendResponse({
-              ...res,
-              sourceTexts: [rawText],
-              gateSkip: [null],
-              timing: { translate: performance.now() - tTrans },
-              backend,
-            });
-          } catch (err) {
-            sendResponse(errorResponse(err));
-          }
-        })().catch((err) => sendResponse(errorResponse(err)));
+          const res = await translateLocal(
+            [rawText],
+            targetLang,
+            sourceLang,
+            seriesContext,
+            llmModel,
+            llmTemperature,
+            undefined,
+            signal,
+          );
+          return {
+            ...res,
+            sourceTexts: [rawText],
+            gateSkip: [null],
+            timing: { translate: performance.now() - tTrans },
+            backend,
+          };
+        });
       } else if (currentMode === "api") {
-        (async () => {
+        runTranslation(stageName(msg.type), async (signal) => {
           await yieldToMain();
           const tTrans = performance.now();
           const res = await translateWithServer(
@@ -140,16 +230,18 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
             sourceLang,
             seriesContext,
             serverConfig(msg.config),
+            undefined,
+            signal,
           );
-          sendResponse({
+          return {
             ...res,
             sourceTexts: [rawText],
             gateSkip: [null],
             timing: { translate: performance.now() - tTrans },
-          });
-        })().catch((err) => sendResponse(errorResponse(err)));
+          };
+        });
       } else {
-        (async () => {
+        runTranslation(stageName(msg.type), async (signal) => {
           await yieldToMain();
           const tTrans = performance.now();
           const res = await translateTextWithGemini(
@@ -160,21 +252,23 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
             seriesContext,
             geminiModel,
             llmTemperature,
+            undefined,
+            signal,
           );
-          sendResponse({
+          return {
             ...res,
             sourceTexts: [rawText],
             gateSkip: [null],
             gate: { mode: "off", checked: 0, skipped: 0, unavailable: false },
             timing: { translate: performance.now() - tTrans },
-          });
-        })().catch((err) => sendResponse(errorResponse(err)));
+          };
+        });
       }
       return true;
     }
 
     if (currentMode === "webgpu") {
-      (async () => {
+      runTranslation(stageName(msg.type), async (signal) => {
         await yieldToMain();
         const tOcr = performance.now();
         const ocrOut = await textRecognise(
@@ -193,35 +287,34 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
         const tTrans = performance.now();
         const backend = await detectBackend();
         if (backend === "wasm") {
-          sendResponse({ error: "Local AI requires WebGPU — not available in this context. Check chrome://gpu or switch to Gemini / API mode." });
-          return;
+          return {
+            error:
+              "Local AI requires WebGPU — not available in this context. Check chrome://gpu or switch to Gemini / API mode.",
+          };
         }
-        try {
-          const res = await translateLocal(
-            ocrResults.map((r) => (r.gateSkip ? "" : r.text)),
-            targetLang,
-            sourceLang,
-            seriesContext,
-            llmModel,
-            llmTemperature,
-            // Auto-Detect: tell the LLM which script the OCR gate settled on
-            // instead of letting it guess the input language (LMT-030).
-            ocrOut.gate?.label || undefined,
-          );
-          sendResponse({
-            ...res,
-            sourceTexts: ocrResults.map((r) => r.text),
-            gateSkip: ocrResults.map((r) => r.gateSkip ?? null),
-            gate: ocrOut.gate,
-            timing: { ocr, translate: performance.now() - tTrans },
-            backend,
-          });
-        } catch (err) {
-          sendResponse(errorResponse(err));
-        }
-      })().catch((err) => sendResponse(errorResponse(err)));
+        const res = await translateLocal(
+          ocrResults.map((r) => (r.gateSkip ? "" : r.text)),
+          targetLang,
+          sourceLang,
+          seriesContext,
+          llmModel,
+          llmTemperature,
+          // Auto-Detect: tell the LLM which script the OCR gate settled on
+          // instead of letting it guess the input language (LMT-030).
+          ocrOut.gate?.label || undefined,
+          signal,
+        );
+        return {
+          ...res,
+          sourceTexts: ocrResults.map((r) => r.text),
+          gateSkip: ocrResults.map((r) => r.gateSkip ?? null),
+          gate: ocrOut.gate,
+          timing: { ocr, translate: performance.now() - tTrans },
+          backend,
+        };
+      });
     } else if (currentMode === "api") {
-      (async () => {
+      runTranslation(stageName(msg.type), async (signal) => {
         await yieldToMain();
         const tOcr = performance.now();
         const ocrOut = await textRecognise(
@@ -247,17 +340,18 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
           // Auto-Detect: the prompt names the script the gate settled on
           // instead of omitting the source language entirely (LMT-030).
           ocrOut.gate?.label || undefined,
+          signal,
         );
-        sendResponse({
+        return {
           ...res,
           sourceTexts: ocrResults.map((r) => r.text),
           gateSkip: ocrResults.map((r) => r.gateSkip ?? null),
           gate: ocrOut.gate,
           timing: { ocr, translate: performance.now() - tTrans },
-        });
-      })().catch((err) => sendResponse(errorResponse(err)));
+        };
+      });
     } else {
-      (async () => {
+      runTranslation(stageName(msg.type), async (signal) => {
         await yieldToMain();
         const tTrans = performance.now();
         const res = await translateWithGemini(
@@ -269,19 +363,21 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
           seriesContext,
           geminiModel,
           llmTemperature,
+          undefined,
+          signal,
         );
         // Match the webgpu/api response contract so content debug + cache
         // never see undefined sourceTexts/gate/timing on the Gemini path
         // (Gemini skips OCR: sourceTexts come from the validator, gate empty).
-        sendResponse({
+        return {
           ...res,
           sourceTexts: res.sourceTexts ?? new Array(bboxes.length).fill(""),
           gateSkip: new Array(bboxes.length).fill(null),
           gate: { mode: "off", checked: 0, skipped: 0, unavailable: false },
           timing: { translate: performance.now() - tTrans },
           backend: await detectBackend(),
-        });
-      })().catch((err) => sendResponse(errorResponse(err)));
+        };
+      });
     }
 
     return true;
@@ -302,25 +398,57 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
     } = msg.config;
     const { title, path } = msg.data;
 
-    if (currentMode === "webgpu") {
-      detectBackend().then((backend) => {
+    const deadline = jobDeadline(msg.timeoutMs, stageName(msg.type));
+    const run = async (): Promise<unknown> => {
+      if (currentMode === "webgpu") {
+        const backend = await detectBackend();
         if (backend === "wasm") {
-          sendResponse({ error: "Local AI requires WebGPU — not available in this context. Check chrome://gpu or switch to Gemini / API mode." });
-          return;
+          return {
+            error:
+              "Local AI requires WebGPU — not available in this context. Check chrome://gpu or switch to Gemini / API mode.",
+          };
         }
-        makeSiteRuleLocal(title, path, llmModel, llmTemperature)
-          .then(sendResponse)
-          .catch((err) => sendResponse({ error: err.message }));
-      });
-    } else if (currentMode === "api") {
-      makeSiteRuleWithServer(title, path, serverConfig(msg.config))
-        .then(sendResponse)
-        .catch((err) => sendResponse({ error: err.message }));
-    } else {
-      makeSiteRuleWithGemini(title, path, geminiKey, geminiModel, llmTemperature)
-        .then(sendResponse)
-        .catch((err) => sendResponse({ error: err.message }));
-    }
+        return makeSiteRuleLocal(
+          title,
+          path,
+          llmModel,
+          llmTemperature,
+          deadline.signal,
+        );
+      }
+      if (currentMode === "api") {
+        return makeSiteRuleWithServer(
+          title,
+          path,
+          serverConfig(msg.config),
+          deadline.signal,
+        );
+      }
+      return makeSiteRuleWithGemini(
+        title,
+        path,
+        geminiKey,
+        geminiModel,
+        llmTemperature,
+        deadline.signal,
+      );
+    };
+
+    run()
+      .then(sendResponse)
+      .catch((err) =>
+        sendResponse(
+          errorResponse(
+            timedOutError(
+              err,
+              deadline.signal,
+              msg.timeoutMs,
+              stageName(msg.type),
+            ),
+          ),
+        ),
+      )
+      .finally(deadline.dispose);
 
     return true;
   }

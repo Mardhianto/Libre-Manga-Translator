@@ -330,6 +330,142 @@ describe("run diagnostics (LMT-032)", () => {
   });
 });
 
+describe("retry predicate (LMT-027)", () => {
+  it("does not re-send a request whose answer failed to parse", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"translations": ["A"' }, finish_reason: "length" }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    await expect(
+      translateWithServer(
+        ["こんにちは"],
+        "English",
+        "Japanese",
+        undefined,
+        openaiConfig,
+      ),
+    ).rejects.toBeInstanceOf(Error);
+
+    // A cut-off answer reproduces identically: the second attempt would only
+    // burn another inference and bury the truncation in the debug log.
+    expect(calls).toBe(1);
+  });
+
+  it("still retries once on a 5xx", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) return new Response("boom", { status: 503 });
+      return openAIResponse({ translations: ["A"] });
+    }) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+    );
+
+    expect(result.translations).toEqual(["A"]);
+    expect(calls).toBe(2);
+  });
+
+  it("does not retry when the job is already cancelled", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return new Response("boom", { status: 503 });
+    }) as unknown as typeof fetch;
+
+    const controller = new AbortController();
+    controller.abort(new DOMException("Timed out after 180s: TRANSLATE_IMAGE", "AbortError"));
+
+    const error = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+      undefined,
+      controller.signal,
+    ).catch((e) => e);
+
+    // No request, no retry: the deadline already passed.
+    expect(calls).toBe(0);
+    // The caller's reason survives, so the stage name reaches the UI.
+    expect(error.message).toContain("Timed out after 180s: TRANSLATE_IMAGE");
+  });
+
+  it("still retries once on a 429", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) return new Response("slow down", { status: 429 });
+      return openAIResponse({ translations: ["A"] });
+    }) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+    );
+
+    expect(result.translations).toEqual(["A"]);
+    expect(calls).toBe(2);
+  });
+
+  it("still retries a transport failure", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) throw new TypeError("Failed to fetch");
+      return openAIResponse({ translations: ["A"] });
+    }) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+    );
+
+    expect(result.translations).toEqual(["A"]);
+    expect(calls).toBe(2);
+  });
+
+  it("passes the abort signal to fetch", async () => {
+    let seen: AbortSignal | undefined;
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      seen = init?.signal ?? undefined;
+      return openAIResponse({ translations: ["A"] });
+    }) as unknown as typeof fetch;
+
+    const controller = new AbortController();
+    await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+      undefined,
+      controller.signal,
+    );
+
+    expect(seen).toBe(controller.signal);
+  });
+});
+
 describe("auto-detect prompt clause (LMT-030)", () => {
   it("names the auto-detected script when the gate picked one", () => {
     const { systemPrompt } = buildTranslationPrompts(
