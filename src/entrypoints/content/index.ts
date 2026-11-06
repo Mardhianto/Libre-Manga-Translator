@@ -457,6 +457,15 @@ export default defineContentScript({
                     seriesContext.lastPageIndex !== null &&
                     resolvedPage === seriesContext.lastPageIndex + 1;
 
+                  // Re-running the page we just translated is not a
+                  // discontinuity (LMT-031): `isContinuous` is false for it,
+                  // and passing that through as `resetHistory` wiped every
+                  // other page's history on a Refine -> Translate.
+                  const isSamePage =
+                    seriesContext.lastChapterId === chapterId &&
+                    seriesContext.lastPageIndex !== null &&
+                    resolvedPage === seriesContext.lastPageIndex;
+
                   const curMode =
                     (cfg["sync:current-mode"] as string | undefined) ??
                     DefaultConfig.currentMode;
@@ -697,7 +706,7 @@ export default defineContentScript({
                       // Never feed an echoed source line into the next prompt.
                       visibleTranslations,
                       context,
-                      { resetHistory: !isContinuous, diagnostics },
+                      { resetHistory: !isContinuous && !isSamePage, diagnostics },
                     ).catch((err) => console.warn("LMT: series-context update failed:", err));
                   } else {
                     console.warn(

@@ -206,6 +206,70 @@ export function toSyncPart(context: SeriesContext): SeriesContextSyncPart {
 }
 
 /**
+ * Is `chapterId + pageIndex` where the context last stopped? (LMT-031)
+ *
+ * A re-run of the page that was just translated satisfies this: the stored
+ * position *is* the page. That is deliberately distinct from "the next page in
+ * sequence" (`lastPageIndex + 1`), which is what continues a read.
+ */
+export function isSamePagePosition(
+  context: SeriesContext,
+  chapterId: string,
+  pageIndex: number,
+): boolean {
+  return (
+    context.lastChapterId === chapterId &&
+    context.lastPageIndex !== null &&
+    Number.isFinite(pageIndex) &&
+    context.lastPageIndex === pageIndex
+  );
+}
+
+/**
+ * Has this page already contributed a history entry? (LMT-031)
+ *
+ * Used to make a re-run an *upsert* rather than a second append. Both the
+ * position and the history are checked: the position catches the normal
+ * re-run, and the history catches a page that was recorded before a jump
+ * moved `lastPageIndex` somewhere else.
+ */
+export function isPageRecorded(
+  context: SeriesContext,
+  chapterId: string,
+  pageIndex: number,
+): boolean {
+  if (isSamePagePosition(context, chapterId, pageIndex)) return true;
+  return (context.recentHistory ?? []).some(
+    (entry) =>
+      entry.chapterId === chapterId &&
+      Number.isFinite(pageIndex) &&
+      entry.pageIndex === pageIndex,
+  );
+}
+
+/**
+ * Replace this page's history entry in place, or append it when absent.
+ *
+ * In place matters: `historyMaxEntries` keeps the *newest* five entries, so a
+ * duplicate would evict a genuine earlier page. Returns a new array.
+ */
+export function upsertHistoryEntry(
+  history: SeriesContext["recentHistory"],
+  entry: SeriesContext["recentHistory"][number],
+): SeriesContext["recentHistory"] {
+  const entries = history ?? [];
+  const index = entries.findIndex(
+    (existing) =>
+      existing.chapterId === entry.chapterId &&
+      existing.pageIndex === entry.pageIndex,
+  );
+  if (index === -1) return [...entries, entry];
+  const next = entries.slice();
+  next[index] = entry;
+  return next;
+}
+
+/**
  * Persistence predicate (LMT-026): only a page whose boxes all translated is
  * allowed to write cache/history. A missing diagnostics object means the
  * response never went through the validator (empty OCR), which is not a
