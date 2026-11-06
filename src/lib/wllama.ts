@@ -1,5 +1,5 @@
 import type { Wllama } from "@wllama/wllama";
-import { DefaultConfig, type LlmModelDef } from "./configs";
+import { DefaultConfig, llmModelDef, type LlmModelDef } from "./configs";
 import { buildSiteRulePrompts, buildTranslationPrompts } from "./prompts";
 import {
   attachDiagnostics,
@@ -174,6 +174,50 @@ export async function resetWllama(): Promise<void> {
     }
     wllama = null;
     loadedModelId = null;
+  }
+}
+
+/** In-flight local jobs; a release requested mid-page is deferred (LMT-029). */
+let activeJobs = 0;
+let releasePending = false;
+
+/**
+ * Free the resident GGUF engine. Mirrors `webllm.ts` `releaseLocalLlm()`:
+ * `applyMode()` calls it when the user leaves Local, and keeping a 2 GB model
+ * loaded in the Firefox background iframe for the rest of the session is the
+ * same regression LMT-029 fixed on Chrome.
+ */
+export async function releaseLocalLlm(): Promise<void> {
+  await resetWllama();
+}
+
+/** Mode-change seam. Gemini ↔ API touches no local engine, so it is a no-op. */
+export async function applyMode(mode: string | null | undefined): Promise<void> {
+  if (mode === "webgpu") return;
+  await releaseLocalLlm();
+}
+
+/** Release unless a page is mid-translation; the last job runs it instead. */
+export async function releaseLocalLlmIdle(): Promise<boolean> {
+  if (activeJobs > 0) {
+    releasePending = true;
+    return false;
+  }
+  await releaseLocalLlm();
+  return true;
+}
+
+/** Job counter for deferred releases — see `withLocalLlmJob` in webllm.ts. */
+async function withLocalLlmJob<T>(task: () => Promise<T>): Promise<T> {
+  activeJobs++;
+  try {
+    return await task();
+  } finally {
+    activeJobs--;
+    if (activeJobs === 0 && releasePending) {
+      releasePending = false;
+      void releaseLocalLlm();
+    }
   }
 }
 
@@ -399,13 +443,39 @@ export async function translateWithWllama(
   /** Cancels generation at the job deadline (LMT-010). */
   signal?: AbortSignal,
 ): Promise<TranslateResult> {
+  // One unit per page: the answer and its correction retry must not be split
+  // by a release requested between them (LMT-029).
+  return withLocalLlmJob(() =>
+    translateWithWllamaUncounted(
+      ocrResults,
+      targetLang,
+      sourceLang,
+      seriesContext,
+      model,
+      temperature,
+      detectedLabel,
+      signal,
+    ),
+  );
+}
+
+async function translateWithWllamaUncounted(
+  ocrResults: string[],
+  targetLang: string,
+  sourceLang: string,
+  seriesContext?: SeriesContext,
+  model?: string,
+  temperature = DefaultConfig.llmTemperature,
+  /** Auto-Detect only: the script the OCR gate identified (LMT-030). */
+  detectedLabel?: string | null,
+  /** Cancels generation at the job deadline (LMT-010). */
+  signal?: AbortSignal,
+): Promise<TranslateResult> {
   if (signal?.aborted) throw abortError(signal);
   if (!ocrResults || ocrResults.length === 0) {
     return { translations: [] };
   }
-  const def = (DefaultConfig.llmModels as LlmModelDef[]).find(
-    (m) => m.id === model,
-  ) ?? (DefaultConfig.llmModels as LlmModelDef[])[0];
+  const def = llmModelDef(model);
 
   const { systemPrompt, userPrompt, schema } = buildTranslationPrompts(
     ocrResults,
@@ -480,10 +550,20 @@ export async function makeSiteRuleWithWllama(
   temperature = DefaultConfig.llmTemperature,
   signal?: AbortSignal,
 ): Promise<AIGeneratedRule> {
+  return withLocalLlmJob(() =>
+    makeSiteRuleWithWllamaUncounted(title, path, model, temperature, signal),
+  );
+}
+
+async function makeSiteRuleWithWllamaUncounted(
+  title: string,
+  path: string,
+  model?: string,
+  temperature = DefaultConfig.llmTemperature,
+  signal?: AbortSignal,
+): Promise<AIGeneratedRule> {
   if (signal?.aborted) throw abortError(signal);
-  const def = (DefaultConfig.llmModels as LlmModelDef[]).find(
-    (m) => m.id === model,
-  ) ?? (DefaultConfig.llmModels as LlmModelDef[])[0];
+  const def = llmModelDef(model);
   const { systemPrompt, userPrompt, schema } = buildSiteRulePrompts(
     title,
     path,

@@ -183,6 +183,29 @@ async function makeSiteRuleLocalRouted(
   return makeSiteRuleLocal(title, path, def.id, llmTemperature, signal);
 }
 
+/**
+ * Release whichever local engine this build actually runs (LMT-029): wllama on
+ * Firefox, WebLLM on Chrome. Keep the positive `import.meta.env.FIREFOX` form
+ * so Chrome still drops the wllama chunk at build time.
+ */
+async function releaseLocalLlmRouted(mode?: string | null): Promise<void> {
+  if (import.meta.env.FIREFOX) {
+    const { applyMode: applyWllamaMode } = await import("./wllama");
+    await applyWllamaMode(mode);
+    return;
+  }
+  await applyMode(mode);
+}
+
+/** Same split for the deferred (mid-page) release. */
+async function releaseLocalLlmIdleRouted(): Promise<boolean> {
+  if (import.meta.env.FIREFOX) {
+    const { releaseLocalLlmIdle: releaseWllamaIdle } = await import("./wllama");
+    return releaseWllamaIdle();
+  }
+  return releaseLocalLlmIdle();
+}
+
 async function detectBackend(): Promise<{ backend: "webgpu" | "wasm"; reason?: string }> {
   try {
     if ("gpu" in navigator) {
@@ -686,19 +709,19 @@ export async function handleGpuStateChanged(msg: any): Promise<{ success: true }
     releaseLama(),
   ]);
   const llmStillOn = gpuEnabledFor("llm");
-  if (before && !llmStillOn) await releaseLocalLlmIdle();
+  if (before && !llmStillOn) await releaseLocalLlmIdleRouted();
   return { success: true };
 }
 
 /**
  * The mode lives in `sync:current-mode`; switching away from Local has to
- * free 1–3 GB of WebLLM VRAM instead of waiting for the document to die
+ * free 1–3 GB of local-model VRAM instead of waiting for the document to die
  * (LMT-029). `applyMode` is a no-op for Gemini ↔ API.
  */
 export async function handleModeChanged(msg: any): Promise<{ success: true }> {
   const mode = (msg?.data as { mode?: string } | undefined)?.mode;
   await ensureGpuState();
-  await applyMode(mode);
+  await releaseLocalLlmRouted(mode);
   return { success: true };
 }
 
