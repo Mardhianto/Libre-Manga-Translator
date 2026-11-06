@@ -257,8 +257,13 @@ async function resolveLocalBackend(
 function startLocalGpuProbe(
   def: ReturnType<typeof llmModelDef>,
 ): Promise<WllamaGpuCapability> | null {
-  if (def.engine !== "wllama" || !import.meta.env.FIREFOX) return null;
-  return import("./wllama").then((m) => m.canUseWllamaWebGPU());
+  // Keep the positive `engine && FIREFOX` form: Rollup only drops the dynamic
+  // import (and therefore the wllama chunk) when the guard folds to `false`
+  // inline. An early-return helper leaves the `import()` reachable.
+  if (def.engine === "wllama" && import.meta.env.FIREFOX) {
+    return import("./wllama").then((m) => m.canUseWllamaWebGPU());
+  }
+  return null;
 }
 
 export async function handleDetectBbox(msg: any): Promise<Bbox[]> {
