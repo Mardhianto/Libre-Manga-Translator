@@ -9,6 +9,8 @@ import {
 import { diagnosticsFromError } from "@/lib/server/validator";
 import { deleteModelAllInfoInCache, hasModelInCache } from "@mlc-ai/web-llm";
 import { makeSiteRuleLocal, translateLocal } from "@/lib/webllm";
+import { releaseLocalLlmIdle, applyMode } from "@/lib/webllm";
+import { ensureGpuState, gpuEnabledFor, refreshGpuState } from "@/lib/gpu-runtime";
 import { inpaintImageAuto, inpaintImageQuality } from "@/lib/inpaint/ladder";
 import { getCachedSegmentation } from "@/lib/detections/segmentation";
 import { checkWebGPUHighPerf, ensureWasmPaths } from "@/lib/hardware";
@@ -29,6 +31,14 @@ async function detectBackend(): Promise<"webgpu" | "wasm"> {
   }
   return "wasm";
 }
+
+/**
+ * WebLLM reply for a mode that needs the local engine while the Translation
+ * GPU toggle is off. Fail loud with the switch to flip instead of silently
+ * loading 3-6 GB of weights the user explicitly disabled (LMT-028).
+ */
+const LLM_GPU_DISABLED_MESSAGE =
+  "GPU acceleration for Translation is off. Enable Settings → GPU acceleration → Translation, or switch to Gemini / API mode.";
 
 function serverConfig(config: Record<string, any>) {
   return {
@@ -133,6 +143,10 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
     const { detectionModel, detectionMinConfidence } = msg.config;
 
     (async () => {
+      // The toggles are read here, not only on GPU_STATE_CHANGED: a page
+      // translated before the user ever opens Settings must already honour
+      // them (LMT-028).
+      await ensureGpuState();
       await yieldToMain();
       return detectTextBubble(msg.data, detectionMinConfidence, detectionModel);
     })()
@@ -168,6 +182,19 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
     };
 
     /**
+     * The persisted GPU toggles are read once per job: a page translated right
+     * after a settings change — or before Settings was ever opened — must
+     * agree with what the panel shows (LMT-028).
+     */
+    const gpuStateReady = ensureGpuState();
+
+    /** WebLLM is only allowed when the Translation GPU toggle is on. */
+    const localLlmBlocked = async (): Promise<{ error: string } | null> => {
+      await gpuStateReady;
+      return gpuEnabledFor("llm") ? null : { error: LLM_GPU_DISABLED_MESSAGE };
+    };
+
+    /**
      * Runs one translate branch under the forwarded deadline and replies with
      * exactly one response. The signal reaches the backend that owns the
      * request, so the deadline actually closes the socket / interrupts
@@ -194,6 +221,8 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
       if (currentMode === "webgpu") {
         runTranslation(stageName(msg.type), async (signal) => {
           await yieldToMain();
+          const blocked = await localLlmBlocked();
+          if (blocked) return blocked;
           const tTrans = performance.now();
           const backend = await detectBackend();
           if (backend === "wasm") {
@@ -270,6 +299,8 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
     if (currentMode === "webgpu") {
       runTranslation(stageName(msg.type), async (signal) => {
         await yieldToMain();
+        const blocked = await localLlmBlocked();
+        if (blocked) return blocked;
         const tOcr = performance.now();
         const ocrOut = await textRecognise(
           src,
@@ -401,6 +432,8 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
     const deadline = jobDeadline(msg.timeoutMs, stageName(msg.type));
     const run = async (): Promise<unknown> => {
       if (currentMode === "webgpu") {
+        await ensureGpuState();
+        if (!gpuEnabledFor("llm")) return { error: LLM_GPU_DISABLED_MESSAGE };
         const backend = await detectBackend();
         if (backend === "wasm") {
           return {
@@ -460,7 +493,10 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
     // "quality": standalone LaMa-first pass with Fast fallback per region.
     // Anything else normalizes to the Fast ladder (no model rung).
     (async () => {
-      await yieldToMain();
+      // LaMa is the only model on the Quality path; its GPU toggle is read
+      // inside `ensureLama()`, but the persisted state must be loaded before
+      // that call can resolve it (LMT-028).
+      await Promise.all([yieldToMain(), ensureGpuState()]);
       if (method === "quality") {
         // Pre-validate weights BEFORE touching LaMa: a missing/incomplete
         // download must not trigger a silent ~207 MB re-fetch at translate
@@ -512,18 +548,38 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
   }
 
   if (msg.type === "OFFSCREEN_GPU_STATE_CHANGED") {
-    // Provider flip (wasm↔webgpu): drop hardware-bound sessions so the next
-    // inference recreates them with the new provider list instead of reusing stale ones.
+    // Provider flip (wasm↔webgpu): adopt the new toggles first, then drop every
+    // hardware-bound session so the next inference recreates it with the new
+    // provider list instead of reusing a stale one (LMT-028). The local LLM is
+    // not ORT: it is only released when its own toggle actually went off, and
+    // deferred if a page is mid-translation (LMT-029).
     const task = (async () => {
+      await ensureGpuState();
+      const before = gpuEnabledFor("llm");
+      await refreshGpuState(msg.data);
       await Promise.allSettled([
         releaseDetection(),
         releaseOcrEngines(),
         releaseGate(),
         releaseLama(),
       ]);
+      const llmStillOn = gpuEnabledFor("llm");
+      if (before && !llmStillOn) await releaseLocalLlmIdle();
       return { success: true };
     })();
     task.then(sendResponse).catch((err) => sendResponse({ success: false, error: (err as Error).message }));
+    return true;
+  }
+
+  if (msg.type === "OFFSCREEN_MODE_CHANGED") {
+    // The mode lives in `sync:current-mode`; switching away from Local has to
+    // free 1–3 GB of WebLLM VRAM instead of waiting for the document to die
+    // (LMT-029). `applyMode` is a no-op for Gemini ↔ API.
+    const mode = (msg.data as { mode?: string } | undefined)?.mode;
+    ensureGpuState()
+      .then(() => applyMode(mode))
+      .then(() => sendResponse({ success: true }))
+      .catch((err) => sendResponse({ success: false, error: (err as Error).message }));
     return true;
   }
 
