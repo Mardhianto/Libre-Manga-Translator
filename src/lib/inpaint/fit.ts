@@ -1,6 +1,7 @@
 import type { Mask } from "./mask";
 import {
   bandIndices,
+  buildTwoSidedSeed,
   crossesEdgeMask,
   dilate,
   maskCount,
@@ -17,6 +18,7 @@ import {
   MASK_GROWTH_STEP,
   MIN_INPAINTING_RADIUS,
   MIN_MASK_THICKNESS,
+  TELEA_SEAL,
 } from "./constants";
 
 /**
@@ -51,10 +53,88 @@ export interface Fitted {
   thickness: number;
   /** smallest deviation ANY candidate achieved, accepted or not */
   bestDeviation: number;
+  /**
+   * The mask a hole-filling engine should use.
+   *
+   * Equal to `mask` whenever a ring was measured. When none was
+   * (`ring.count === 0`) `mask` is only the seed grown one step - for outlined
+   * lettering that is a hollow ring around the glyph, and a pixel engine
+   * reading it as the hole leaves the glyph cores as KNOWN pixels inside its
+   * own search radius and paints their tone across the region (the white
+   * smear). In that case this is the two-sided contrast mask over the ink
+   * bounds, sealed against the anti-aliased fringe (see `teleaMaskFor`).
+   */
+  teleaMask: Mask;
 }
 
 export const deviationThreshold = (noiseSigma: number): number =>
   Math.max(FIT_DEV_MIN, FIT_DEV_NOISE_FACTOR * noiseSigma);
+
+/** Bounding box of a mask's set pixels, in crop-local coordinates. */
+function maskBounds(m: Mask): { x1: number; y1: number; x2: number; y2: number } {
+  const { w, h, data } = m;
+  let x1 = w;
+  let y1 = h;
+  let x2 = -1;
+  let y2 = -1;
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      if (!data[row + x]) continue;
+      if (x < x1) x1 = x;
+      if (x > x2) x2 = x;
+      if (y < y1) y1 = y;
+      if (y > y2) y2 = y;
+    }
+  }
+  return x2 < x1 ? { x1: 0, y1: 0, x2: -1, y2: -1 } : { x1, y1, x2, y2 };
+}
+
+/**
+ * The mask a hole-filling engine gets when no ring was measurable (`ring.count`
+ * is 0 - the fit never grew a single accepted candidate).
+ *
+ * `mask` in that case is `ink` - the seed grown by one step, which for
+ * outlined lettering is a hollow ring around the glyph. A pixel engine reading
+ * that ring as its hole leaves the glyph cores as KNOWN (unmasked) pixels
+ * inside its own search radius and paints their tone across the region: the
+ * white smear. So the Telea rung gets a two-sided contrast mask over the ink
+ * bounds (dark outline AND light core both inside the hole), unioned with the
+ * outline, then sealed with a two-pixel dilation so the anti-aliased seam
+ * around each core is inside too.
+ *
+ * The two-pixel seal is measured, not chosen: one pixel leaves the 1 px AA
+ * fringe as a bright known ring (1.2% smear on the fixture), two absorbs it
+ * (0.2%). The ink-bounds rect (not the seed bounds) is what carries the whole
+ * box; a seed-derived rect crops the outermost glyph.
+ */
+function teleaMaskFor(seed: Mask, ink: Mask, luma: Float32Array): Mask {
+  const bounds = maskBounds(ink);
+  if (bounds.x2 < bounds.x1) return ink;
+
+  const twoSided = buildTwoSidedSeed(
+    luma,
+    seed.w,
+    seed.h,
+    seed.ox,
+    seed.oy,
+    bounds,
+  );
+  const union = new Uint8Array(seed.w * seed.h);
+  let count = 0;
+  for (let i = 0; i < union.length; i++) {
+    if (twoSided.data[i] || ink.data[i]) {
+      union[i] = 1;
+      count++;
+    }
+  }
+  if (count === 0) return ink;
+
+  return dilate(
+    { data: union, w: seed.w, h: seed.h, ox: seed.ox, oy: seed.oy },
+    TELEA_SEAL,
+  );
+}
 
 /**
  * Seed measured on the crop. `mag` = crop Sobel, `strongFloor` page-level.
@@ -141,14 +221,14 @@ export function fitMask(
       route: "inpaint",
       thickness: 0,
       bestDeviation: Infinity,
+      teleaMask: teleaMaskFor(seed, ink, luma),
     };
   }
 
   const stats = incumbentRing.stats;
   const failThreshold = deviationThreshold(noiseSigma);
 
-  const fitFailed =
-    stats.count < 12 || bestDeviation > failThreshold;
+  const fitFailed = stats.count < 12 || bestDeviation > failThreshold;
   const secondPopulation =
     stats.deviation > INPAINT_MIN_STD &&
     thickness <= MIN_INPAINTING_RADIUS &&
@@ -169,6 +249,9 @@ export function fitMask(
     route,
     thickness,
     bestDeviation: Math.min(bestDeviation, stats.deviation),
+    // A measured ring means the shape is trustworthy; only the no-ring path
+    // (above) widens to the two-sided contrast mask.
+    teleaMask: incumbent,
   };
 }
 

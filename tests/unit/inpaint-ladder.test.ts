@@ -158,6 +158,83 @@ describe("Inpainting Ladder — Pixel-Level Fixtures", () => {
     expect(img.data[rightTextIdx]).toBeLessThan(230);
   });
 
+  // ── 3b. No-ring fit: Telea gets the glyph cores, not a hollow outline ────
+  it("no-ring fit: teleaMask covers light glyph cores so Telea cannot smear them back", () => {
+    const w = 100;
+    const h = 60;
+    // Outlined lettering (light core, dark outline) on mid-tone artwork. The
+    // first glyph is clipped by the masking box, so the first candidate's
+    // border rides a strong edge, growth stops, and no ring is ever measured -
+    // `ring.count === 0`, the path that used to hand a hollow outline to Telea.
+    const art = (x: number, y: number): [number, number, number, number] => {
+      const glyphs = [
+        { x0: -4, y0: 20, x1: 24, y1: 40 },
+        { x0: 52, y0: 20, x1: 74, y1: 40 },
+      ];
+      for (const g of glyphs) {
+        if (x < g.x0 || x > g.x1 || y < g.y0 || y > g.y1) continue;
+        const core =
+          x >= g.x0 + 3 && x <= g.x1 - 3 && y >= g.y0 + 3 && y <= g.y1 - 3;
+        const v = core ? 250 : 15;
+        return [v, v, v, 255];
+      }
+      return [150, 150, 150, 255];
+    };
+    const box = { x1: 12, y1: 8, x2: 78, y2: 52 };
+
+    const img = makeImageData(w, h, art);
+    const luma = extractLuma(img);
+    const mag = sobelMagnitude(luma, w, h);
+    const floor = strongEdgeFloor(luma, w, h);
+    const sigma = pageNoiseSigma(luma, w, h);
+    const seed = buildInkSeed(luma, w, h, 0, 0, box);
+    const fitted = fitMask(seed, luma, img.data, mag, floor, sigma);
+
+    // The precondition this test exists for.
+    expect(fitted.ring.count).toBe(0);
+    expect(fitted.teleaMask.data).not.toBe(fitted.mask.data);
+
+    // Glyph 2 is fully inside the masking box, so every light core pixel it
+    // owns must be inside the hole. (Glyph 1 is clipped by the box and so is
+    // out of scope - those pixels are outside the region by construction.)
+    const inGlyph2 = (x: number, y: number) =>
+      x >= 52 && x <= 74 && y >= 20 && y <= 40;
+    let coreTotal = 0;
+    let coreHole = 0;
+    let coreTelea = 0;
+    for (let y = 20; y <= 40; y++) {
+      for (let x = 52; x <= 74; x++) {
+        const i = y * w + x;
+        if (luma[i] < 240 || !inGlyph2(x, y)) continue;
+        coreTotal++;
+        if (fitted.mask.data[i]) coreHole++;
+        if (fitted.teleaMask.data[i]) coreTelea++;
+      }
+    }
+    expect(coreTotal).toBeGreaterThan(100);
+    expect(coreHole).toBeLessThan(coreTotal); // the old hole was hollow
+    expect(coreTelea).toBe(coreTotal); // the new hole is not
+
+    // End to end: the second glyph is fully enclosed by its own outline, so a
+    // surviving core is exactly what Telea used to spread across the region.
+    const oldImg = makeImageData(w, h, art);
+    teleaInpaint(oldImg, fitted.mask.data, 3);
+    const newImg = makeImageData(w, h, art);
+    teleaInpaint(newImg, fitted.teleaMask.data, 3);
+
+    const bright = (im: ImageData) => {
+      let n = 0;
+      for (let y = 20; y <= 40; y++) {
+        for (let x = 52; x <= 74; x++) {
+          if (im.data[(y * w + x) * 4] > 190) n++;
+        }
+      }
+      return n;
+    };
+    expect(bright(oldImg)).toBeGreaterThan(100); // ghost of the white core
+    expect(bright(newImg)).toBe(0); // painted over with artwork tone
+  });
+
   // ── 4. Edge Preservation: Never paints over balloon outlines ─────────────
   it("Mask dilation halts at strong edges (balloon boundary protected at pixel level)", () => {
     const w = 120;

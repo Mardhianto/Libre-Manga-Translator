@@ -61,6 +61,19 @@ export const DENOISE_NOISE_FLOOR = 4;
 /** Ink-seed threshold factor between ink and paper (ocr/utils.ts math). */
 export const INK_PAPER_FACTOR = 0.4;
 
+/** Minimum contrast (levels) between paper and an ink extreme before that side
+ * of the histogram is treated as real ink. Below it the "extreme" is grain. */
+export const INK_SIDE_MIN_GAP = 12;
+
+/**
+ * Dilation (px) applied to the no-ring Telea mask. The two-sided contrast mask
+ * covers the glyph and its outline but leaves the 1 px anti-aliased seam
+ * around the light core as a known bright pixel; Telea then pulls that tone in.
+ * 1 px leaves 1.2% of the hole smeared on the real fixture, 2 px absorbs the
+ * fringe and drops it to 0.2%.
+ */
+export const TELEA_SEAL = 2;
+
 /** Component filters for the ink seed. */
 export const MIN_COMPONENT_PX = 4;
 export const MAX_COMPONENT_FRACTION = 0.6;
