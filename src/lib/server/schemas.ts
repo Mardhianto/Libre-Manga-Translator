@@ -3,7 +3,9 @@ export interface ServerConfig {
   /**
    * `ollama` is the native `/api/chat` schema: the only one that can carry
    * `options.num_ctx` and `think`, both of which the OpenAI-compatible path
-   * silently ignores (LMT-024).
+   * silently ignores (LMT-024). `lmstudio` talks to LM Studio's OpenAI API,
+   * because its native `/api/v1/chat` cannot turn thinking off and returns a
+   * reasoning item instead of the answer (LMT-018/033).
    */
   serverSchema: "openai" | "lmstudio" | "ollama";
   serverModel: string;
@@ -78,36 +80,6 @@ export function buildOpenAITextRequest(
   return body;
 }
 
-export function buildLmStudioTextRequest(
-  model: string,
-  systemPrompt: string,
-  userPrompt: string,
-  temperature: number,
-  schema?: object,
-  mode: ResponseFormatMode = schema ? "json_schema" : "none",
-  schemaName = "manga_translation",
-  budget?: OutputBudget,
-) {
-  const body: Record<string, unknown> = {
-    model,
-    input: [{ type: "text", content: userPrompt }],
-    system_prompt: systemPrompt,
-    temperature,
-    max_output_tokens: budget?.maxTokens ?? 4096,
-    stream: false,
-  };
-
-  // The native /api/v1/chat endpoint does not document response_format. Send
-  // it when a schema is available and let callServer fall back on 400/422.
-  if (mode === "json_schema" && schema) {
-    body.response_format = jsonSchemaFormat(schema, schemaName);
-  } else if (mode === "json_object") {
-    body.response_format = { type: "json_object" };
-  }
-
-  return body;
-}
-
 export interface OllamaChatRequestOptions {
   numCtx: number;
   /** Answer budget; maps to `options.num_predict`. */
@@ -166,11 +138,17 @@ export function buildOllamaChatRequest(
 /**
  * Endpoint path for a schema.
  *
- * `openai` and `lmstudio` are paths under the stored host (which already ends
- * in `/v1` or `/api/v1`). Ollama's native endpoint is absolute from the origin,
- * so it is resolved against the origin and the stored `/v1` suffix is dropped -
- * both `http://127.0.0.1:11434/v1` and `http://127.0.0.1:11434` reach
- * `/api/chat` (LMT-024).
+ * `openai` is a path under the stored host (which already ends in `/v1`).
+ * Ollama's native endpoint is absolute from the origin, so it is resolved
+ * against the origin and the stored `/v1` suffix is dropped - both
+ * `http://127.0.0.1:11434/v1` and `http://127.0.0.1:11434` reach `/api/chat`
+ * (LMT-024).
+ *
+ * `lmstudio` also resolves from the origin, because LM Studio serves the
+ * OpenAI API at `/v1` while its legacy host was `/api/v1` and its native one
+ * `/api/v0`. Every stored profile may carry any of those, and
+ * `/api/v1/chat/completions` is a 404, so the suffix has to be stripped
+ * (LMT-018/033).
  */
 export function resolveChatEndpoint(
   host: string,
@@ -179,10 +157,23 @@ export function resolveChatEndpoint(
   const trimmed = (host ?? "").trim().replace(/\/+$/, "");
 
   if (schema === "ollama") {
-    const origin = trimmed.replace(/\/(?:v1|api)$/i, "");
-    return `${origin}/api/chat`;
+    return `${originOf(trimmed)}/api/chat`;
   }
 
-  const path = schema === "lmstudio" ? "chat" : "chat/completions";
-  return `${trimmed}/${path}`;
+  if (schema === "lmstudio") {
+    return `${originOf(trimmed)}/v1/chat/completions`;
+  }
+
+  return `${trimmed}/chat/completions`;
+}
+
+/**
+ * Origin of a stored host, dropping the API version suffix LM Studio (and
+ * Ollama's OpenAI path) may carry.
+ *
+ * `/api/v1`, `/api/v0`, `/api` and `/v1` all describe the same origin; only
+ * the path the schema needs is appended afterwards.
+ */
+function originOf(host: string): string {
+  return host.replace(/\/(?:api\/v\d+|api|v\d+)$/i, "");
 }

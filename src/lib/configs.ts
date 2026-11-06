@@ -104,7 +104,8 @@ export const DefaultConfig = {
   serverApiKey: "",
   serverEndpoints: {
     openai: "chat/completions",
-    lmstudio: "chat",
+    // The OpenAI API LM Studio serves at /v1 (LMT-018/033).
+    lmstudio: "v1/chat/completions",
     ollama: "api/chat",
   },
   /**

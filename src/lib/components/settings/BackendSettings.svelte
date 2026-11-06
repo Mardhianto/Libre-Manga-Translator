@@ -62,8 +62,9 @@
     success: boolean;
     models?: string[];
     error?: string;
-    provider?: "ollama" | "openai-compatible";
+    provider?: "ollama" | "lmstudio" | "openai-compatible";
     suggestNativeOllama?: boolean;
+    loadedContextLength?: number;
   } | null>(null);
   let deletingLlm = $state(false);
   let deletingLlmError = $state<string | null>(null);
@@ -391,6 +392,11 @@
         {#if serverSchema === "ollama"}
           Page prompt + answer must fit here, or Ollama cuts the start of the
           prompt without an error. Grows automatically when a page needs more.
+        {:else if serverSchema === "lmstudio"}
+          LM Studio sets the window when it loads the model, and ignores this
+          value. Press <span class="font-bold">Test Connection</span> to read
+          the window it actually allocated — an over-long page fails loudly
+          rather than being truncated.
         {:else}
           Only the native Ollama schema applies this. On OpenAI-compatible
           endpoints the server's own default window is used and an over-long
@@ -410,10 +416,8 @@
           Reasoning tokens are billed to the answer budget.
           {#if serverSchema === "ollama"}
             Native schema.
-          {:else if serverSchema === "openai"}
-            Sent as reasoning_effort: none.
           {:else}
-            Not supported by the LM Studio schema.
+            Sent as reasoning_effort: none.
           {/if}
         </span>
       </div>
@@ -484,6 +488,14 @@
           >
             Switch to Ollama (native)
           </button>
+        </div>
+      {/if}
+      {#if serverTestResult.success && serverTestResult.loadedContextLength}
+        <div
+          class="text-[10px] p-2 rounded-lg border bg-[var(--accent-emerald-soft)] border-[var(--accent-emerald)]/30 text-[var(--accent-emerald)] font-mono leading-relaxed"
+        >
+          Loaded context window: {serverTestResult.loadedContextLength.toLocaleString("en-US")} tok.
+          LM Studio owns this value — raise it in the app if a page does not fit.
         </div>
       {/if}
       {#if serverTestResult.success && serverTestResult.error}

@@ -277,7 +277,7 @@ Open the extension popup and go through the onboarding flow, or go to **Settings
 - **API Mode:**
   1. Select API Mode in the Home tab
   2. Choose your schema (**Ollama (native)**, OpenAI-compatible, or LM Studio)
-  3. Set the Host URL (e.g. `http://127.0.0.1:11434` for Ollama or `http://127.0.0.1:1234/api/v1` for LM Studio)
+  3. Set the Host URL (e.g. `http://127.0.0.1:11434` for Ollama or `http://127.0.0.1:1234` for LM Studio)
   4. Enter your model name (e.g. `qwen3.5:4b`)
   5. Click **Test Connection** to verify
   6. Set the **Context window** (default 4096) and turn on **Disable thinking** if your model emits reasoning tokens
@@ -336,9 +336,12 @@ Open the extension popup and go through the onboarding flow, or go to **Settings
    - Select your model
    - Click **Start Server**
 4. **Configure LMT:**
-   - Host: `http://127.0.0.1:1234/api/v1`
-   - Schema: LM Studio (Experimental)
+   - Host: `http://127.0.0.1:1234`
+   - Schema: LM Studio
    - Model: match what you loaded in LM Studio
+   - Turn on **Disable thinking** if the model supports reasoning
+
+LM Studio sets the context window when it loads the model. Press **Test Connection** to see the window it actually allocated; a page that does not fit fails with a clear error instead of being silently truncated. Legacy hosts like `http://127.0.0.1:1234/api/v1` still work — LMT resolves them to LM Studio's `/v1` OpenAI API, which is the only path that can disable thinking.
 
 
 #### Or any other OpenAI-compatible App like Unsloth Desktop, Jan, GPT4All, Llama.cpp and many more.

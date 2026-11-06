@@ -1,7 +1,6 @@
 import { DefaultConfig } from "../configs";
 import { buildSiteRulePrompts, buildTranslationPrompts } from "../prompts";
 import {
-  buildLmStudioTextRequest,
   buildOllamaChatRequest,
   buildOpenAITextRequest,
   resolveChatEndpoint,
@@ -42,7 +41,7 @@ interface CallServerOptions {
   signal?: AbortSignal;
   /** Answer budget from `resolveOutputCap(boxes)` (LMT-024). */
   maxTokens?: number;
-  /** Context window to request; native Ollama only. */
+  /** Context window to request; only the native Ollama schema can set one. */
   numCtx?: number;
 }
 
@@ -55,7 +54,9 @@ interface ServerResponse {
 
 const FORMAT_CHAINS: Record<ServerConfig["serverSchema"], ResponseFormatMode[]> = {
   openai: ["json_schema", "json_object"],
-  lmstudio: ["json_schema", "json_object", "none"],
+  // LM Studio serves the OpenAI API, where both formats are supported, so it
+  // gets the same chain as `openai` (LMT-018/033).
+  lmstudio: ["json_schema", "json_object"],
   // Native `format` takes the schema object directly; the fallbacks cover
   // servers whose grammar compiler rejects it (LMT-024).
   ollama: ["json_schema", "json_object", "none"],
@@ -125,7 +126,7 @@ function delayUnlessAborted(ms: number, signal?: AbortSignal): Promise<boolean> 
 interface RequestScope {
   /** Answer budget; becomes `num_predict` / `max_tokens`. */
   maxTokens: number;
-  /** Context window; native Ollama only (the OpenAI path cannot set it). */
+  /** Context window; only the native Ollama schema can request one. */
   numCtx: number;
   /** Whether to ask the provider to skip reasoning tokens. */
   disableThinking: boolean;
@@ -178,28 +179,17 @@ async function requestOnce(
           schema,
           mode,
         )
-      : config.serverSchema === "lmstudio"
-        ? buildLmStudioTextRequest(
-            config.serverModel,
-            systemPrompt,
-            userPrompt,
-            config.temperature,
-            schema,
-            mode,
-            schemaName,
-            budget,
-          )
-        : buildOpenAITextRequest(
-            config.serverModel,
-            systemPrompt,
-            userPrompt,
-            config.temperature,
-            schema,
-            mode,
-            schemaName,
-            budget,
-            scope.disableThinking && !scope.dropReasoningEffort,
-          );
+      : buildOpenAITextRequest(
+          config.serverModel,
+          systemPrompt,
+          userPrompt,
+          config.temperature,
+          schema,
+          mode,
+          schemaName,
+          budget,
+          scope.disableThinking && !scope.dropReasoningEffort,
+        );
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (config.useServerApiKey && config.serverApiKey) {
@@ -224,37 +214,39 @@ async function requestOnce(
 
     const data = await response.json();
 
-    // Three schemas, three shapes. Native Ollama reports the answer under
-    // `message` and its own token counts (LMT-024); the other two keep their
-    // existing paths untouched.
+    // Two shapes. Native Ollama reports the answer under `message` and its own
+    // token counts (LMT-024); the OpenAI path - which LM Studio now uses -
+    // nests it per choice. LM Studio's native `output[]` array is no longer
+    // read: a thinking model puts a reasoning item first, and with a small
+    // budget the message item is absent entirely (LMT-033).
     const native = config.serverSchema === "ollama";
-    const content = native
-      ? data?.message?.content
-      : config.serverSchema === "lmstudio"
-        ? data?.output?.[0]?.content
-        : data?.choices?.[0]?.message?.content;
+    const message = native
+      ? data?.message
+      : data?.choices?.[0]?.message;
+    const content = message?.content;
 
     if (!content) {
-      // A thinking model on the OpenAI path returns `reasoning` and an empty
-      // `content`. Naming that explicitly beats "Empty response".
-      const reasoning = data?.choices?.[0]?.message?.reasoning;
+      // A thinking model on the OpenAI path returns its reasoning and an empty
+      // `content`. LM Studio spells it `reasoning_content`, Ollama `/v1` and
+      // most others `reasoning`; naming that explicitly beats "Empty response".
+      const reasoning =
+        message?.reasoning_content ?? message?.reasoning ?? data?.message?.reasoning;
       if (typeof reasoning === "string" && reasoning.length > 0) {
         throw markNonRetryable(
           new Error(
-            "Server returned reasoning text but no answer — the model is thinking, and its reasoning used the whole token budget. Use the Ollama (native) schema with thinking off.",
+            "Server returned reasoning text but no answer — the model is thinking, and its reasoning used the whole token budget. Turn on “Disable thinking”, or raise the context window.",
           ),
         );
       }
       throw new Error("Empty response from server");
     }
 
-    // Both schemas report a stop reason; OpenAI nests it per choice, LM Studio
-    // puts it on the item. "length" is the truncation signal (LMT-032).
+    // Both schemas report a stop reason; Ollama's native reply puts it at the
+    // top level, the OpenAI path nests it per choice. "length" is the
+    // truncation signal (LMT-032).
     const finishReason: string | undefined = native
       ? data?.done_reason
-      : config.serverSchema === "lmstudio"
-        ? (data?.output?.[0]?.finish_reason ?? data?.stats?.finish_reason)
-        : data?.choices?.[0]?.finish_reason;
+      : data?.choices?.[0]?.finish_reason;
 
     const info: LlmRunInfo = {
       rawResponse: clipRawResponse(content),
@@ -263,11 +255,13 @@ async function requestOnce(
       promptChars: promptChars(systemPrompt, userPrompt),
       promptTokens: estimateTokens(systemPrompt, userPrompt),
       // Ground truth from the server: the number the estimate is measured
-      // against. Absent on OpenAI/LM Studio.
+      // against. Native Ollama reports it; LM Studio exposes usage counts.
       promptEvalCount:
         typeof data?.prompt_eval_count === "number"
           ? data.prompt_eval_count
-          : undefined,
+          : typeof data?.usage?.prompt_tokens === "number"
+            ? data.usage.prompt_tokens
+            : undefined,
       numCtx: native ? scope.numCtx : undefined,
       thinkingDisabled: native
         ? !scope.dropThink
@@ -312,7 +306,7 @@ async function requestOnce(
       if (
         !scope.dropReasoningEffort &&
         scope.disableThinking &&
-        config.serverSchema === "openai" &&
+        config.serverSchema !== "ollama" &&
         mentionsField(err, /reasoning_effort|reasoning\.effort/i)
       ) {
         console.warn(
@@ -374,9 +368,7 @@ async function callServer(
     ? FORMAT_CHAINS[config.serverSchema]
     : config.serverSchema === "ollama"
       ? (["none"] as ResponseFormatMode[])
-      : config.serverSchema === "lmstudio"
-        ? (["none"] as ResponseFormatMode[])
-        : (["json_object"] as ResponseFormatMode[]);
+      : (["json_object"] as ResponseFormatMode[]);
 
   const startIndex = options.startMode
     ? Math.max(0, chain.indexOf(options.startMode))
@@ -400,8 +392,16 @@ async function callServer(
     // configured default is a floor, never a ceiling that truncates.
     requested: options.numCtx ?? config.numCtx ?? DefaultConfig.serverNumCtx,
   });
-  const verdict = budgetVerdict({ promptTokens, outputCap, numCtx });
-  if (verdict.level !== "ok") {
+  // Only the native Ollama schema can actually request a window, so only there
+  // does "this will not fit" describe what the server will do. LM Studio picks
+  // its own window and rejects an over-long prompt loudly, and an
+  // OpenAI-compatible server's window is unknown - voicing the Ollama
+  // truncation warning on either would be a claim we cannot back (LMT-018).
+  const verdict =
+    config.serverSchema === "ollama"
+      ? budgetVerdict({ promptTokens, outputCap, numCtx })
+      : undefined;
+  if (verdict && verdict.level !== "ok") {
     console.warn(`[server] prompt budget: ${verdict.message}`);
   }
 
@@ -555,16 +555,27 @@ export interface ServerProbeResult {
   /**
    * Which server actually answered. `ollama` means a native `/api/version`
    * responded, so the caller can offer the schema upgrade that fixes prompt
-   * truncation (LMT-024).
+   * truncation (LMT-024). `lmstudio` means `/api/v0/models` answered, which is
+   * the only way to read the window LM Studio actually allocated.
    */
-  provider?: "ollama" | "openai-compatible";
+  provider?: "ollama" | "lmstudio" | "openai-compatible";
   /** True when the config still uses the truncating OpenAI path on Ollama. */
   suggestNativeOllama?: boolean;
+  /**
+   * The context window LM Studio reports for the loaded model, in tokens.
+   * LM Studio ignores a per-request `context_length` on a resident model and
+   * sets the window in its own UI, so this is the real number to show
+   * (LMT-018). Absent when the model is not loaded or is not LM Studio.
+   */
+  loadedContextLength?: number;
 }
 
-/** Origin of a stored host, dropping `/v1` or `/api` suffixes. */
+/** Origin of a stored host, dropping `/v1`, `/api/v1` or `/api` suffixes. */
 function originOf(host: string): string {
-  return (host ?? "").trim().replace(/\/+$/, "").replace(/\/(?:v1|api)$/i, "");
+  return (host ?? "")
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/(?:api\/v\d+|api|v\d+)$/i, "");
 }
 
 async function fetchOllamaTags(origin: string): Promise<string[] | null> {
@@ -581,6 +592,49 @@ async function fetchOllamaTags(origin: string): Promise<string[] | null> {
           .filter((id: unknown): id is string => typeof id === "string")
       : [];
     return models;
+  } catch {
+    return null;
+  }
+}
+
+interface LmStudioModels {
+  models: string[];
+  /** Window the loaded instance is really running with, if one is resident. */
+  loadedContextLength?: number;
+}
+
+/**
+ * Read LM Studio's own model list.
+ *
+ * `/api/v0/models` is the only endpoint that reports `loaded_context_length`,
+ * and LM Studio ignores a per-request context override on a resident model -
+ * so this is how the real window is discovered (LMT-018). Returns null when
+ * the host is not LM Studio.
+ */
+async function fetchLmStudioModels(origin: string): Promise<LmStudioModels | null> {
+  try {
+    const response = await fetch(`${origin}/api/v0/models`, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const entries: {
+      id?: string;
+      state?: string;
+      loaded_context_length?: number;
+    }[] = Array.isArray(data?.data) ? data.data : [];
+    const models = entries
+      .map((m) => m?.id)
+      .filter((id: unknown): id is string => typeof id === "string");
+    const loaded = entries.find((m) => m?.state === "loaded");
+    return {
+      models,
+      loadedContextLength:
+        typeof loaded?.loaded_context_length === "number"
+          ? loaded.loaded_context_length
+          : undefined,
+    };
   } catch {
     return null;
   }
@@ -627,10 +681,15 @@ export async function testServerConnection(
     return { success: true, models, provider: "ollama" };
   }
 
-  const baseUrl = config.serverHost.endsWith("/")
-    ? config.serverHost
-    : config.serverHost + "/";
-  const url = `${baseUrl}models`;
+  // Probe the same API family the translate call will use: LM Studio resolves
+  // to `<origin>/v1/...`, everything else to the stored host (LMT-018).
+  const modelsBase =
+    config.serverSchema === "lmstudio"
+      ? `${originOf(config.serverHost)}/v1`
+      : config.serverHost.endsWith("/")
+        ? config.serverHost.slice(0, -1)
+        : config.serverHost;
+  const url = `${modelsBase}/models`;
 
   try {
     const response = await fetch(url, { method: "GET", headers });
@@ -641,6 +700,25 @@ export async function testServerConnection(
     const models: string[] =
       data?.data?.map((m: { id?: string }) => m?.id).filter(Boolean) ??
       (Array.isArray(data?.models) ? data.models : []);
+
+    // The `lmstudio` schema talks to LM Studio's OpenAI API, so a green probe
+    // above says nothing about the window it allocated. `/api/v0/models` does,
+    // and it is the only place that number exists (LMT-018).
+    if (config.serverSchema === "lmstudio") {
+      const lm = await fetchLmStudioModels(originOf(config.serverHost));
+      if (lm !== null) {
+        return {
+          success: true,
+          models: models.length > 0 ? models : lm.models,
+          provider: "lmstudio",
+          loadedContextLength: lm.loadedContextLength,
+          error:
+            lm.loadedContextLength === undefined
+              ? "Connected, but no model is loaded in LM Studio — load one before translating."
+              : undefined,
+        };
+      }
+    }
 
     // Detection runs on the same host: `/api/tags` is Ollama-only and costs one
     // local request. Seeing it while the config still uses `openai` is exactly

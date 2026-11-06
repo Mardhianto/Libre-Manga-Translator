@@ -40,11 +40,15 @@
     {
       id: "lmstudio",
       name: "LM Studio",
-      defaultHost: "http://localhost:1234/api/v1",
+      // The OpenAI-compatible API. LM Studio's native `/api/v1/chat` cannot
+      // turn thinking off and returns a reasoning item instead of the answer,
+      // so the schema resolves `/v1/chat/completions` from this origin
+      // (LMT-018/033).
+      defaultHost: "http://localhost:1234",
       defaultSchema: "lmstudio",
       defaultModel: "",
       defaultNumCtx: 4096,
-      defaultDisableThinking: false,
+      defaultDisableThinking: true,
       requiresApiKey: false,
       noteKey: "lmstudio",
     },
