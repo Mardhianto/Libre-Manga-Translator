@@ -24,6 +24,7 @@
     "test:unit": "bun test tests/unit/",
     "test:e2e": "playwright test",
     "mock:llm": "bun scripts/lmt-mock-server.ts",
+    "ollama:live": "bun scripts/ollama-live-check.ts",
     "test": "bun run test:unit && bun run test:e2e",
     "prepublish:check": "bun run check && bun run check:ocr-audit && bun run test:unit && bun run build && bun run test:e2e && bun run build:firefox",
     "extract-dict": "node scripts/extract-ppocrv6-dict.cjs",

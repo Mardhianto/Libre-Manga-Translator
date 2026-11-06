@@ -24,6 +24,8 @@
     serverHost = $bindable(DefaultConfig.serverHost),
     serverSchema = $bindable(DefaultConfig.serverSchema),
     serverModel = $bindable(DefaultConfig.serverModel),
+    serverNumCtx = $bindable(DefaultConfig.serverNumCtx),
+    serverDisableThinking = $bindable(DefaultConfig.serverDisableThinking),
     useServerApiKey = $bindable(DefaultConfig.useServerApiKey),
     serverApiKey = $bindable(DefaultConfig.serverApiKey),
     geminiKey = $bindable(""),
@@ -36,6 +38,10 @@
     serverHost: string;
     serverSchema: string;
     serverModel: string;
+    /** Requested context window; native Ollama only (LMT-024). */
+    serverNumCtx: number;
+    /** Suppress reasoning tokens where the backend supports it. */
+    serverDisableThinking: boolean;
     useServerApiKey: boolean;
     serverApiKey: string;
     geminiKey: string;
@@ -56,6 +62,8 @@
     success: boolean;
     models?: string[];
     error?: string;
+    provider?: "ollama" | "openai-compatible";
+    suggestNativeOllama?: boolean;
   } | null>(null);
   let deletingLlm = $state(false);
   let deletingLlmError = $state<string | null>(null);
@@ -165,6 +173,8 @@
             serverHost,
             serverSchema,
             serverModel,
+            serverNumCtx,
+            serverDisableThinking,
             useServerApiKey,
             serverApiKey,
             temperature: llmTemperature,
@@ -176,6 +186,13 @@
     } finally {
       serverTesting = false;
     }
+  }
+
+  /** Adopt the native schema in one click when the probe found Ollama. */
+  function switchToNativeOllama() {
+    serverSchema = "ollama";
+    serverNumCtx = DefaultConfig.serverNumCtx;
+    serverTestResult = null;
   }
 
   async function deleteLlmModel() {
@@ -333,6 +350,7 @@
           bind:value={serverSchema}
           class="w-full bg-[var(--bg-void)] border border-[var(--border-faint)] rounded-lg p-2.5 text-sm outline-none cursor-pointer text-[var(--text-primary)]"
         >
+          <option value="ollama">Ollama (native)</option>
           <option value="openai">OpenAI-compatible</option>
           <option value="lmstudio">LM Studio</option>
         </select>
@@ -348,6 +366,56 @@
           placeholder="model name"
           class="w-full bg-[var(--bg-void)] border border-[var(--border-faint)] rounded-lg p-2.5 text-sm focus:border-[var(--border-line)] outline-none transition-all text-[var(--text-primary)] placeholder:text-[var(--text-dim)]"
         />
+      </div>
+    </div>
+
+    <div class="space-y-1.5">
+      <div class="flex justify-between items-center">
+        <label for="server-num-ctx" class="text-[10px] font-bold uppercase tracking-widest text-[var(--text-dim)]">
+          Context window
+        </label>
+        <span class="text-[10px] font-mono font-bold text-[var(--text-primary)]">
+          {serverNumCtx.toLocaleString("en-US")} tok
+        </span>
+      </div>
+      <input
+        id="server-num-ctx"
+        type="number"
+        min="1024"
+        max="32768"
+        step="1024"
+        bind:value={serverNumCtx}
+        class="w-full bg-[var(--bg-void)] border border-[var(--border-faint)] rounded-lg p-2.5 text-sm focus:border-[var(--border-line)] outline-none transition-all font-mono text-[var(--text-primary)]"
+      />
+      <p class="text-[10px] text-[var(--text-dim)] leading-relaxed">
+        {#if serverSchema === "ollama"}
+          Page prompt + answer must fit here, or Ollama cuts the start of the
+          prompt without an error. Grows automatically when a page needs more.
+        {:else}
+          Only the native Ollama schema applies this. On OpenAI-compatible
+          endpoints the server's own default window is used and an over-long
+          prompt is silently truncated.
+        {/if}
+      </p>
+    </div>
+
+    <div class="flex items-center gap-3">
+      <label class="switch-cyber shrink-0">
+        <input type="checkbox" bind:checked={serverDisableThinking} />
+        <span class="track"><span class="thumb"></span></span>
+      </label>
+      <div class="min-w-0">
+        <span class="text-xs text-[var(--text-primary)] block">Disable thinking</span>
+        <span class="text-[10px] text-[var(--text-dim)] block leading-snug">
+          Reasoning tokens are billed to the answer budget.
+          {#if serverSchema === "ollama"}
+            Native schema.
+          {:else if serverSchema === "openai"}
+            Sent as reasoning_effort: none.
+          {:else}
+            Not supported by the LM Studio schema.
+          {/if}
+        </span>
       </div>
     </div>
 
@@ -403,6 +471,26 @@
           {serverTestResult.error}
         {/if}
       </div>
+      {#if serverTestResult.success && serverTestResult.suggestNativeOllama}
+        <div
+          class="text-[10px] p-2 rounded-lg border bg-[var(--accent-amber-soft)] border-[var(--accent-amber)]/30 text-[var(--accent-amber)] leading-relaxed"
+        >
+          This is an Ollama server on the OpenAI-compatible path, which cannot
+          set the context window — long pages get their prompt cut silently.
+          <button
+            type="button"
+            onclick={switchToNativeOllama}
+            class="mt-1.5 block w-full py-1.5 rounded bg-[var(--accent-amber)] text-[#05040b] font-bold cursor-pointer transition-opacity hover:opacity-90"
+          >
+            Switch to Ollama (native)
+          </button>
+        </div>
+      {/if}
+      {#if serverTestResult.success && serverTestResult.error}
+        <p class="text-[10px] text-[var(--accent-amber)] font-mono leading-relaxed">
+          {serverTestResult.error}
+        </p>
+      {/if}
     {/if}
 
     <div class="pt-2.5 border-t border-[var(--border-faint)]">

@@ -50,6 +50,12 @@ function runDiagnosticFields(d?: TranslationDiagnostics) {
     llmCalls: d?.llmCalls,
     finishReason: d?.finishReason,
     promptChars: d?.promptChars,
+    promptTokens: d?.promptTokens,
+    promptEvalCount: d?.promptEvalCount,
+    numCtx: d?.numCtx,
+    thinkingDisabled: d?.thinkingDisabled,
+    budgetLevel: d?.budgetLevel,
+    budgetWarning: d?.budgetWarning,
     padded: d?.padded,
     truncated: d?.truncated,
   };
@@ -492,6 +498,8 @@ export default defineContentScript({
                     "local:server-model",
                     "local:use-server-api-key",
                     "local:server-api-key",
+                    "local:server-num-ctx",
+                    "local:server-disable-thinking",
                     "sync:script-gate",
                   ]);
                   const runtime = Object.fromEntries(
@@ -523,6 +531,12 @@ export default defineContentScript({
                       serverModel: runtime["local:server-model"] as string | undefined,
                       useServerApiKey: runtime["local:use-server-api-key"] as boolean | undefined,
                       serverApiKey: runtime["local:server-api-key"] as string | undefined,
+                      serverNumCtx:
+                        (runtime["local:server-num-ctx"] as number | undefined) ??
+                        DefaultConfig.serverNumCtx,
+                      serverDisableThinking:
+                        (runtime["local:server-disable-thinking"] as boolean | undefined) ??
+                        DefaultConfig.serverDisableThinking,
                       scriptGate:
                         (runtime["sync:script-gate"] as boolean | undefined) ??
                         DefaultConfig.scriptGate,

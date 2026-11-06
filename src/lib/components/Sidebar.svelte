@@ -54,6 +54,8 @@ import { onDestroy } from "svelte";
   let serverHost = $state(DefaultConfig.serverHost);
   let serverSchema = $state(DefaultConfig.serverSchema);
   let serverModel = $state(DefaultConfig.serverModel);
+  let serverNumCtx = $state(DefaultConfig.serverNumCtx);
+  let serverDisableThinking = $state(DefaultConfig.serverDisableThinking);
   let useServerApiKey = $state(DefaultConfig.useServerApiKey);
   let serverApiKey = $state(DefaultConfig.serverApiKey);
   let geminiKey = $state("");
@@ -188,6 +190,8 @@ import { onDestroy } from "svelte";
         "local:server-host",
         "local:server-schema",
         "local:server-model",
+        "local:server-num-ctx",
+        "local:server-disable-thinking",
         "local:use-server-api-key",
         "local:server-api-key",
         "sync:custom-site-rules",
@@ -220,6 +224,9 @@ import { onDestroy } from "svelte";
       serverHost = saved["local:server-host"] ?? serverHost;
       serverSchema = saved["local:server-schema"] ?? serverSchema;
       serverModel = saved["local:server-model"] ?? serverModel;
+      serverNumCtx = saved["local:server-num-ctx"] ?? serverNumCtx;
+      serverDisableThinking =
+        saved["local:server-disable-thinking"] ?? serverDisableThinking;
       useServerApiKey = saved["local:use-server-api-key"] ?? useServerApiKey;
       serverApiKey = saved["local:server-api-key"] ?? serverApiKey;
       customRules = saved["sync:custom-site-rules"] ?? customRules;
@@ -270,6 +277,8 @@ import { onDestroy } from "svelte";
       { key: "local:server-host", value: serverHost },
       { key: "local:server-schema", value: serverSchema },
       { key: "local:server-model", value: serverModel },
+      { key: "local:server-num-ctx", value: serverNumCtx },
+      { key: "local:server-disable-thinking", value: serverDisableThinking },
       { key: "local:use-server-api-key", value: useServerApiKey },
       { key: "local:server-api-key", value: serverApiKey },
       { key: "sync:custom-site-rules", value: $state.snapshot(customRules) },
@@ -554,6 +563,8 @@ import { onDestroy } from "svelte";
                   bind:serverHost
                   bind:serverSchema
                   bind:serverModel
+                  bind:serverNumCtx
+                  bind:serverDisableThinking
                   bind:useServerApiKey
                   bind:serverApiKey
                   bind:geminiKey
