@@ -208,7 +208,7 @@ export async function releaseLocalLlmIdle(): Promise<boolean> {
 }
 
 /** Job counter for deferred releases — see `withLocalLlmJob` in webllm.ts. */
-async function withLocalLlmJob<T>(task: () => Promise<T>): Promise<T> {
+export async function withLocalLlmJob<T>(task: () => Promise<T>): Promise<T> {
   activeJobs++;
   try {
     return await task();
