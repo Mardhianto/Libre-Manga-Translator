@@ -75,6 +75,20 @@ export default defineBackground(() => {
     void getBackendCap().then(pumpBackendQueue);
   });
 
+  // Leaving Local mode must free WebLLM VRAM instead of leaving it resident in
+  // the offscreen document for the rest of the session (LMT-029). The offscreen
+  // hook decides whether the switch is a no-op (Gemini ↔ API).
+  storage.watch<string>("sync:current-mode", (mode) => {
+    void (async () => {
+      try {
+        await ensureOffscreen();
+        await browser.runtime.sendMessage({ type: "OFFSCREEN_MODE_CHANGED", data: { mode } });
+      } catch {
+        // No offscreen document means no engine to release.
+      }
+    })();
+  });
+
   // ── Central resumable download manager ─────────────────────────────
   // Single owner for every ONNX weight download (setup wizard, popup
   // Config, sidebar Vision) so Pause in one UI can Resume in another.

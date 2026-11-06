@@ -1,7 +1,7 @@
 import * as ort from "onnxruntime-web/all";
-import { resolveExecutionProvidersForModel } from "../hardware";
 import { downloadArtifactHF } from "../utils";
 import { DefaultConfig } from "../configs";
+import { gpuEnabledFor } from "../gpu-runtime";
 import type { Fitted } from "./fit";
 import { dilate, type Mask } from "./mask";
 import {
@@ -322,13 +322,14 @@ export async function ensureLama(): Promise<boolean> {
   if (!loadPromise) {
     loadPromise = (async () => {
       try {
+        // The effective provider is logged once by `downloadArtifactHF`
+        // (`[ort] <artifact> → …`), so this path does not log it again.
         session = await downloadArtifactHF(
           DefaultConfig.lamaRepo,
           DefaultConfig.lamaModelPath,
+          false,
+          { gpu: gpuEnabledFor("inpaint") },
         );
-        // InferenceSession exposes no public .providers in ORT 1.30, so log
-        // the requested list instead of reading back.
-        console.info(`[inpaint] LaMa session ready (${resolveExecutionProvidersForModel(DefaultConfig.lamaModelPath).join("+")})`);
       } catch (err) {
         console.warn("LMT: LaMa inpainter model unavailable:", err);
         session = null;
@@ -360,7 +361,7 @@ async function fallbackLamaToWasm(): Promise<boolean> {
         false,
         { gpu: false },
       );
-      console.info("[inpaint] LaMa WASM fallback session ready (wasm)");
+      console.info("[inpaint] LaMa WASM fallback session ready");
     } catch (err) {
       console.warn("LMT: LaMa WASM fallback unavailable:", err);
       session = null;

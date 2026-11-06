@@ -1,6 +1,7 @@
 import * as ort from "onnxruntime-web/all";
 import { createRunLock, downloadArtifactHF } from "../utils";
 import { DefaultConfig } from "../configs";
+import { gpuEnabledFor } from "../gpu-runtime";
 import { ctcBestPath, osdPreprocess } from "./ctc";
 import { judgeVotes, type LineScript, type RegionVerdict } from "./index";
 
@@ -36,6 +37,10 @@ export async function ensureGate(): Promise<boolean> {
           downloadArtifactHF(
             DefaultConfig.gateRepo,
             DefaultConfig.gateModelPath,
+            false,
+            // The gate is part of the recognition stage: it shares the `ocr`
+            // toggle rather than getting its own switch (LMT-028).
+            { gpu: gpuEnabledFor("ocr") },
           ),
           downloadArtifactHF(
             DefaultConfig.gateRepo,

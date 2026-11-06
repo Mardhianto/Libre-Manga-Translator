@@ -15,6 +15,57 @@ import {
 
 let globalEngine: MLCEngine | null = null;
 let currentlyLoadedModel: string | null = null;
+/** In-flight translate jobs; a release requested mid-page is deferred to the last one (LMT-029). */
+let activeJobs = 0;
+let releasePending = false;
+
+/**
+ * Free the local LLM. Called when the user leaves Local mode or turns the
+ * Translation GPU toggle off: the offscreen document otherwise lives for the
+ * whole browser session and keeps 1–3 GB of VRAM plus the weights loaded
+ * (LMT-029).
+ *
+ * The globals are cleared *before* awaiting `unload()` so a translate that
+ * starts during teardown creates a fresh engine instead of grabbing the one
+ * being disposed. `unload()` failures are not fatal — the pointers are already
+ * gone, and the next translate reloads from cache.
+ */
+export async function releaseLocalLlm(): Promise<void> {
+  const engine = globalEngine;
+  globalEngine = null;
+  currentlyLoadedModel = null;
+  if (!engine) return;
+  try {
+    await engine.unload();
+    console.info("[webllm] local LLM unloaded (VRAM freed)");
+  } catch (err) {
+    console.warn("[webllm] unload during release failed:", err);
+  }
+}
+
+/**
+ * Mode-change seam. Only leaving Local needs the VRAM back; switching
+ * Gemini ↔ API touches no local engine, so it must not force a 3–6 GB reload
+ * for a user who comes back.
+ */
+export async function applyMode(mode: string | null | undefined): Promise<void> {
+  if (mode === "webgpu") return;
+  await releaseLocalLlm();
+}
+
+/**
+ * Release unless a page is mid-translation — aborting `chatCompletion` here
+ * would turn a mode flip into a failed page. The last job's `finally` runs the
+ * deferred release instead.
+ */
+export async function releaseLocalLlmIdle(): Promise<boolean> {
+  if (activeJobs > 0) {
+    releasePending = true;
+    return false;
+  }
+  await releaseLocalLlm();
+  return true;
+}
 
 /**
  * WebLLM has no `AbortSignal` support: `chatCompletion` runs until it decides
@@ -44,12 +95,40 @@ export async function translateLocal(
   /** Cancels generation at the job deadline (LMT-010). */
   signal?: AbortSignal,
 ): Promise<TranslateResult> {
+  // Registered here (not in runLLMModel) so the answer and its correction
+  // round-trip are one unit: a release requested between them waits instead of
+  // tearing the engine out mid-page (LMT-029).
+  return withLocalLlmJob(() =>
+    translateLocalUncounted(
+      ocrResults,
+      targetLang,
+      sourceLang,
+      seriesContext,
+      model,
+      temperature,
+      detectedLabel,
+      signal,
+    ),
+  );
+}
+
+async function translateLocalUncounted(
+  ocrResults: string[],
+  targetLang: string,
+  sourceLang: string,
+  seriesContext?: SeriesContext,
+  model = DefaultConfig.llmModels[0].id,
+  temperature = DefaultConfig.llmTemperature,
+  /** Auto-Detect only: the script the OCR gate identified. */
+  detectedLabel?: string | null,
+  /** Cancels generation at the job deadline (LMT-010). */
+  signal?: AbortSignal,
+): Promise<TranslateResult> {
   signal?.throwIfAborted();
   const resolvedModel = normalizeLlmModel(model);
   if (!ocrResults || ocrResults.length === 0) {
     return { translations: [] };
   }
-
   const { systemPrompt, userPrompt, schema } = buildTranslationPrompts(
     ocrResults,
     targetLang,
@@ -123,13 +202,15 @@ export async function makeSiteRuleLocal(
     path,
   );
 
-  const { data } = await runLLMModel(
-    systemPrompt,
-    userPrompt,
-    schema,
-    resolvedModel,
-    temperature,
-    signal,
+  const { data } = await withLocalLlmJob(() =>
+    runLLMModel(
+      systemPrompt,
+      userPrompt,
+      schema,
+      resolvedModel,
+      temperature,
+      signal,
+    ),
   );
   return data;
 }
@@ -213,5 +294,22 @@ async function runLLMModel(
     }
   } finally {
     if (onAbort) signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
+ * Job counter for deferred releases (LMT-029). `runLLMModel` is the only place
+ * that keeps the engine busy, so enter/exit is textually adjacent to it here.
+ */
+export async function withLocalLlmJob<T>(task: () => Promise<T>): Promise<T> {
+  activeJobs++;
+  try {
+    return await task();
+  } finally {
+    activeJobs--;
+    if (activeJobs === 0 && releasePending) {
+      releasePending = false;
+      void releaseLocalLlm();
+    }
   }
 }

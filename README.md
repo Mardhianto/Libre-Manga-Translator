@@ -4,7 +4,7 @@
   <p><i>"Translate manga directly in your browser: 100% on-device (Local), cloud (Gemini), or self-hosted LLM backends"</i></p>
 
   <p>
-    <img src="https://img.shields.io/github/v/release/mrdhnto/libre-manga-translator?style=flat&logo=github&logoColor=white&color=00ffff" alt="Version">
+    <img src="https://img.shields.io/github/v/release/mardhianto/libre-manga-translator?style=flat&logo=github&logoColor=white&color=00ffff" alt="Version">
     <img src="https://img.shields.io/badge/Platform-Chrome%20%7C%20Firefox-8a2be2?style=flat&logo=googlechrome&logoColor=white" alt="Browser Support">
     <img src="https://img.shields.io/badge/GPU-where_the_model_supports_it-e05a2c?style=flat&logo=wgpu&logoColor=white" alt="WebGPU where the model supports it, WASM CPU otherwise">
     <img src="https://img.shields.io/badge/Framework-Svelte%205%20%2B%20WXT-ff3e00?style=flat&logo=svelte&logoColor=white" alt="Svelte 5">
@@ -12,7 +12,7 @@
   </p>
 
   <p>
-    <a href="https://github.com/mrdhnto/libre-manga-translator/releases/latest"><img src="docs/images/github-badge.svg" height="40" alt="Get it on GitHub"></a>
+    <a href="https://github.com/mardhianto/libre-manga-translator/releases/latest"><img src="docs/images/github-badge.svg" height="40" alt="Get it on GitHub"></a>
     <a href="https://addons.mozilla.org/en-US/firefox/addon/libre-manga-translator/" target="_blank" rel="noopener"><img src="docs/images/firefox-badge.svg" height="40" alt="Get it on Firefox AMO"></a>
     <a href="https://chromewebstore.google.com/detail/libre-manga-translator/ojpfedogijigmfcpckgghdeepmpaikag" target="_blank" rel="noopener"><img src="docs/images/chrome-badge.svg" height="40" alt="Get it on Chrome Web Store"></a>
   </p>

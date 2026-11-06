@@ -126,13 +126,19 @@ export interface GpuState {
     llm: boolean;
     inpaint: boolean;
     ocr: boolean;
+    /**
+     * Detection is its own stage (RT-DETR / ComicTextDetector), separate from
+     * OCR recognition. It used to share the `ocr` toggle, which meant turning
+     * off recognition also forced the detector to CPU (LMT-028).
+     */
+    detection: boolean;
   };
 }
 
 export const DEFAULT_GPU_STATE: GpuState = {
   webgpuSupported: null,
   webgpuMaster: true,
-  webgpuOverrides: { llm: true, inpaint: true, ocr: true },
+  webgpuOverrides: { llm: true, inpaint: true, ocr: true, detection: true },
 };
 
 /**
@@ -149,13 +155,30 @@ export function normalizeGpuState(raw: Partial<GpuState> | undefined | null): Gp
       llm: raw?.webgpuOverrides?.llm ?? DEFAULT_GPU_STATE.webgpuOverrides.llm,
       inpaint: raw?.webgpuOverrides?.inpaint ?? DEFAULT_GPU_STATE.webgpuOverrides.inpaint,
       ocr: raw?.webgpuOverrides?.ocr ?? DEFAULT_GPU_STATE.webgpuOverrides.ocr,
+      detection: raw?.webgpuOverrides?.detection ?? DEFAULT_GPU_STATE.webgpuOverrides.detection,
     },
   };
 }
 
-/** Effective GPU flag for a subsystem (`master && per-subsystem`). */
-export function isGpuEnabledFor(state: GpuState, key: keyof GpuState["webgpuOverrides"]): boolean {
-  return state.webgpuSupported === true && state.webgpuMaster && state.webgpuOverrides[key] === true;
+/**
+ * Effective GPU flag for a subsystem (`master && per-subsystem`).
+ *
+ * `webgpuSupported` is `null` on most installs: the probe only ever persists
+ * `true`, and a failed re-probe removes the key. Treating `null` as "no" here
+ * would force every never-probed user onto WASM the moment this flag is
+ * actually wired into the ORT loads (LMT-028), so the unknown state is
+ * delegated to the caller through `assumeSupported` — a context that can see
+ * `navigator.gpu` passes `true` to keep the previous behaviour.
+ */
+export function isGpuEnabledFor(
+  state: GpuState,
+  key: keyof GpuState["webgpuOverrides"],
+  options?: { assumeSupported?: boolean },
+): boolean {
+  if (!state.webgpuMaster || state.webgpuOverrides[key] !== true) return false;
+  if (state.webgpuSupported === true) return true;
+  if (state.webgpuSupported === false) return false;
+  return options?.assumeSupported === true;
 }
 
 /**

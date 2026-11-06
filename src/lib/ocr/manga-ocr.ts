@@ -1,6 +1,7 @@
 import * as ort from "onnxruntime-web/all";
 import { createRunLock, downloadArtifactHF } from "../utils";
 import { DefaultConfig } from "../configs";
+import { gpuEnabledFor } from "../gpu-runtime";
 import type { OcrEngine, SingleOcrResult } from "./types";
 import type { GateReason } from "../gate";
 
@@ -44,9 +45,11 @@ export class MangaOcrEngine implements OcrEngine {
     if (this.encoderSession && this.decoderSession && this.vocab) return;
 
     const repo = DefaultConfig.mangaOcrRepo;
+    // Recognition stage: same `ocr` toggle as Paddle/Pororo (LMT-028).
+    const gpu = gpuEnabledFor("ocr");
     const [enc, dec, vocabResp] = await Promise.all([
-      downloadArtifactHF(repo, "encoder_model.onnx"),
-      downloadArtifactHF(repo, "decoder_model.onnx"),
+      downloadArtifactHF(repo, "encoder_model.onnx", false, { gpu }),
+      downloadArtifactHF(repo, "decoder_model.onnx", false, { gpu }),
       downloadArtifactHF(repo, "vocab.txt"),
     ]);
 

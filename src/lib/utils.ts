@@ -152,12 +152,18 @@ export async function downloadArtifactHF(
       // so the WASM retry gets fresh bytes, not a detached view.
       const modelBytes = new Uint8Array(await response.arrayBuffer());
       try {
-        return await ort.InferenceSession.create(modelBytes.slice().buffer, {
+        const session = await ort.InferenceSession.create(modelBytes.slice().buffer, {
           executionProviders: providers,
         });
+        // One line per session is the only place the effective provider is
+        // visible: the toggles are spread over four loaders, and ORT exposes
+        // no public `.providers` to read it back afterwards (LMT-028).
+        console.info(`[ort] ${modelIdentifier} → ${providers.join("+")}`);
+        return session;
       } catch (err: any) {
         if (providers.includes("webgpu")) {
           console.warn(`[ort] WebGPU session creation failed for ${modelIdentifier}, falling back to WASM:`, err?.message);
+          console.info(`[ort] ${modelIdentifier} → wasm (webgpu create failed)`);
           return await ort.InferenceSession.create(modelBytes.slice().buffer, {
             executionProviders: ["wasm"],
           });
