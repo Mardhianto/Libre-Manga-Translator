@@ -213,6 +213,54 @@ function serverConfig(config: Record<string, any>) {
   };
 }
 
+/**
+ * Resolve the provider actually usable for a local-LLM request.
+ *
+ * On Firefox the wllama probe is authoritative: an adapter without JSPI still
+ * can't run WebGPU inference (wllama disables it), so a "webgpu" adapter
+ * reading must not mask the real fallback cause.
+ *
+ * `gpuProbe` lets the image path start `canUseWllamaWebGPU()` before OCR so
+ * the probe resolves during inference instead of adding latency; the text
+ * path passes nothing and probes inline.
+ */
+async function resolveLocalBackend(
+  def: ReturnType<typeof llmModelDef>,
+  gpuProbe?: Promise<WllamaGpuCapability> | null,
+): Promise<{
+  backend: "webgpu" | "wasm";
+  gpuUnavailableReason?: string;
+}> {
+  const gpu = gpuProbe ? await gpuProbe : null;
+  const backendRes = await detectBackend();
+  const backend: "webgpu" | "wasm" =
+    gpu && !gpu.ok ? "wasm" : backendRes.backend;
+  if (backend !== "wasm") return { backend };
+
+  let gpuUnavailableReason: string;
+  if (gpu && !gpu.ok) {
+    // Firefox wllama path: about:config-specific detail.
+    gpuUnavailableReason = gpu.detail;
+  } else if (def.engine === "wllama" || import.meta.env.FIREFOX) {
+    gpuUnavailableReason =
+      backendRes.reason ?? "WebGPU unavailable in this context";
+  } else {
+    // Chrome build (WebLLM owns GPU init): actionable hint.
+    gpuUnavailableReason = backendRes.reason
+      ? `${backendRes.reason} — check chrome://gpu`
+      : "WebGPU unavailable in this context — check chrome://gpu";
+  }
+  return { backend, gpuUnavailableReason };
+}
+
+/** Start the Firefox-only wllama capability probe, or null when unused. */
+function startLocalGpuProbe(
+  def: ReturnType<typeof llmModelDef>,
+): Promise<WllamaGpuCapability> | null {
+  if (def.engine !== "wllama" || !import.meta.env.FIREFOX) return null;
+  return import("./wllama").then((m) => m.canUseWllamaWebGPU());
+}
+
 export async function handleDetectBbox(msg: any): Promise<Bbox[]> {
   const { detectionModel, detectionMinConfidence } = msg.config;
   // The toggles are read here, not only on GPU_STATE_CHANGED: a page
@@ -273,12 +321,21 @@ export async function handleTranslateImage(msg: any): Promise<unknown> {
     if (currentMode === "webgpu") {
       const blocked = await localLlmBlocked();
       if (blocked) return blocked;
-      const backendRes = await detectBackend();
-      const backend = backendRes.backend;
+      const def = llmModelDef(llmModel);
+      const probe = startLocalGpuProbe(def);
+      const { backend, gpuUnavailableReason } = await resolveLocalBackend(
+        def,
+        probe,
+      );
       if (backend === "wasm") {
+        const hint = gpuUnavailableReason ? ` (${gpuUnavailableReason})` : "";
         return {
           error:
-            "Local AI requires WebGPU — not available in this context. Check chrome://gpu or switch to Gemini / API mode.",
+            def.engine === "wllama" && import.meta.env.FIREFOX
+              ? `Local model requires WebGPU acceleration on Firefox${hint}. ` +
+                `Enable "dom.webgpu.enabled" and "javascript.options.wasm_js_promise_integration" in about:config, or switch to API / Gemini mode.`
+              : `Local AI requires WebGPU — not available in this context${hint}. Switch to Gemini / API mode.`,
+          gpuUnavailableReason,
         };
       }
       const res = await translateLocalRouted(
@@ -348,10 +405,7 @@ export async function handleTranslateImage(msg: any): Promise<unknown> {
       // branch stays FIREFOX-gated so Chrome builds drop the wllama chunk
       // entirely (dead-branch elimination at build time); the engine check
       // additionally skips it for stale webllm prefs on Firefox profiles.
-      let gpuProbe: Promise<WllamaGpuCapability> | null = null;
-      if (def.engine === "wllama" && import.meta.env.FIREFOX) {
-        gpuProbe = import("./wllama").then((m) => m.canUseWllamaWebGPU());
-      }
+      const gpuProbe = startLocalGpuProbe(def);
       const ocrOut = await textRecognise(
         src,
         bboxes,
@@ -365,29 +419,10 @@ export async function handleTranslateImage(msg: any): Promise<unknown> {
       const ocrResults = ocrOut.results;
       const ocr = performance.now() - tOcr;
       await yieldToMain();
-      const gpu = gpuProbe ? await gpuProbe : null;
-      const backendRes = await detectBackend();
-      // On Firefox the wllama probe is authoritative: an adapter without
-      // JSPI still can't run WebGPU inference (wllama disables it), so a
-      // "webgpu" adapter reading must not mask the real fallback cause.
-      const backend = gpu && !gpu.ok ? "wasm" : backendRes.backend;
-      let gpuUnavailableReason: string | undefined;
-      if (backend === "wasm") {
-        if (gpu && !gpu.ok) {
-          // Firefox wllama path: about:config-specific detail.
-          gpuUnavailableReason = gpu.detail;
-        } else if (def.engine === "wllama") {
-          gpuUnavailableReason = backendRes.reason;
-        } else if (import.meta.env.FIREFOX) {
-          gpuUnavailableReason =
-            backendRes.reason ?? "WebGPU unavailable in this context";
-        } else {
-          // Chrome build (WebLLM owns GPU init): actionable hint.
-          gpuUnavailableReason = backendRes.reason
-            ? `${backendRes.reason} — check chrome://gpu`
-            : "WebGPU unavailable in this context — check chrome://gpu";
-        }
-      }
+      const { backend, gpuUnavailableReason } = await resolveLocalBackend(
+        def,
+        gpuProbe,
+      );
       if (def.engine === "wllama" && backend === "wasm") {
         const hint = gpuUnavailableReason ? ` (${gpuUnavailableReason})` : "";
         return {
@@ -521,22 +556,19 @@ export async function handleMakeSiteRule(msg: any): Promise<unknown> {
       await ensureGpuState();
       if (!gpuEnabledFor("llm")) return { error: LLM_GPU_DISABLED_MESSAGE };
       const def = llmModelDef(llmModel);
-      if (def.engine === "wllama" && import.meta.env.FIREFOX) {
-        const { canUseWllamaWebGPU } = await import("./wllama");
-        const gpu = await canUseWllamaWebGPU();
-        if (!gpu.ok) {
-          return {
-            error:
-              `Local AI rule generation requires WebGPU acceleration on Firefox (${gpu.detail}). ` +
-              `Enable "dom.webgpu.enabled" and "javascript.options.wasm_js_promise_integration" in about:config, or switch to API / Gemini mode.`,
-          };
-        }
-      }
-      const backend = (await detectBackend()).backend;
+      const { backend, gpuUnavailableReason } = await resolveLocalBackend(
+        def,
+        startLocalGpuProbe(def),
+      );
       if (backend === "wasm") {
+        const hint = gpuUnavailableReason ? ` (${gpuUnavailableReason})` : "";
         return {
           error:
-            "Local AI requires WebGPU — not available in this context. Check chrome://gpu or switch to Gemini / API mode.",
+            def.engine === "wllama" && import.meta.env.FIREFOX
+              ? `Local AI rule generation requires WebGPU acceleration on Firefox${hint}. ` +
+                `Enable "dom.webgpu.enabled" and "javascript.options.wasm_js_promise_integration" in about:config, or switch to API / Gemini mode.`
+              : `Local AI requires WebGPU — not available in this context${hint}. Switch to Gemini / API mode.`,
+          gpuUnavailableReason,
         };
       }
       return await makeSiteRuleLocalRouted(
