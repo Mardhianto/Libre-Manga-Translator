@@ -42,7 +42,7 @@ Developer-facing details for Libre Manga Translator: models, settings, pipeline 
 | Script gate | OSD script-identification LSTM (~3.7 MB, ONNX Runtime Web) + Unicode-block text verification |
 | On-device OCR | PaddleOCR ONNX (`~90 MB` Latin + Chinese/Japanese packs, multilingual default), PP-OCRv6 Manga ONNX (`~21 MB`, Japanese-only manga fine-tune), Manga-OCR ONNX (`~460 MB`, Japanese flagship), or Pororo OCR ONNX (`~74 MB`, Korean specialist) |
 | Inpainting | Fast model-free engine ladder (Rung 0: Planar fill, Rung 1: Bilateral denoise, Rung 2: Telea) + independent Quality mode (standalone neural LaMa redraw, `~207 MB`, with Fast ladder fallback) |
-| Local translation | [WebLLM](https://webllm.mlc.ai/) (Llama-3.2-1B / Qwen3.5-0.8B / Qwen3.5-2B / Qwen3.5-4B) |
+| Local translation | [WebLLM](https://webllm.mlc.ai/) (Llama-3.2-1B / Qwen3.5-0.8B / Gemma2-2B-JPN / Qwen3.5-2B / Hermes-3-3B / Qwen3.5-4B / Phi-4-mini / Qwen3.5-9B) |
 | Cloud translation | Gemini API via REST |
 | API Mode backends | Ollama, LM Studio, OpenAI-compatible |
 | Storage | WXT storage (wraps chrome.storage); model weights in browser cache (see below) |
@@ -85,7 +85,7 @@ title + summary + dictionary
 + last 5 translations"]
     Ctx --> LLM{LLM Backend?}
 
-    LLM -->|Local| WebLLM["WebLLM - Llama-3.2-1B / Qwen3.5
+    LLM -->|Local| WebLLM["WebLLM - Llama-3.2-1B / Qwen3.5 / Gemma2-JPN
 GPU accelerated where WebLLM supports it"]
     LLM -->|API| Server["Self-Hosted Server
 Ollama / LM Studio / OpenAI-compatible"]
@@ -144,7 +144,7 @@ Two selectable detectors. Switch in **Vision › Detection › Model Selection**
 | Model | Size | License | Notes |
 |---|---|---|---|
 | Comic Bubble Detector (RT-DETR-v2, default) | 11.1 MB | Apache-2.0 | `ogkalu/comic-text-and-bubble-detector`. Detects `bubble`, `text_bubble`, `text_free`. Good at bubbles and free-floating text. |
-| Comic Text Detector & Segmentation | 94.7 MB | GPL-3.0 | `comictextdetector.pt.onnx` (dmMaze via manga-image-translator beta-0.3). Returns text boxes plus a per-pixel segmentation mask (`[1, 1, 1024, 1024]`) upsampled to page resolution; `buildSegmentationSeed` seeds `fitMask()` directly from the mask, falling back to `buildInkSeed` when absent. Tiles tall/oversized pages with the shared sliding-window policy; tile masks composite into one page mask with per-pixel max. |
+| Comic Text Detector & Segmentation | 94.7 MB | GPL-3.0 | `comictextdetector.pt.onnx` (dmMaze via manga-image-translator beta-0.3). Returns text boxes plus a per-pixel segmentation mask (`[1, 1, 1024, 1024]`) upsampled to page resolution; `buildSegmentationSeed` seeds `fitMask()` directly from the mask, falling back to `buildInkSeed` when absent. |
 
 Unknown model ids throw `UNKNOWN_DETECTION_MODEL_MESSAGE` with setup-wizard directions.
 
@@ -173,7 +173,7 @@ In-tree runtime: line preprocessing, polarity normalization, CTC decoding, and d
 
 | Engine | Size | Best for |
 |---|---|---|
-| PaddleOCR (default) | `~90 MB` (Latin + Chinese/Japanese packs ship at setup) | Fast multilingual generalist. Per-language-group `rec.onnx` + `dict.txt` under `languages/<group>/`, resolved per page by `resolveLangGroup()` (`src/lib/configs.ts`) or the script gate's label under Auto-Detect; 9 more packs download on first use. |
+| PaddleOCR (default) | `~90 MB` (Latin + Chinese/Japanese packs ship at setup) | Fast multilingual generalist. Per-language-group `rec.onnx` + `dict.txt` under `languages/<group>/`, resolved per page by `resolveLangGroup()` (`src/lib/configs.ts`) or the script gate's page majority under Auto-Detect; 9 more packs download on first use. |
 | PP-OCRv6 Manga | `~21 MB` | Japanese-only manga fine-tune ([fumetodev/PP-OCRv6_small_rec_manga_ONNX](https://huggingface.co/fumetodev/PP-OCRv6_small_rec_manga_ONNX)) — a little bit limited but smaller size. Same CTC contract as PaddleOCR (48px height, stock ppocrv6 dict + space + blank), fixed file + bundled `public/dicts/ppocrv6_dict.txt` (refresh via `bun run extract-dict`). Limits (per model card): Japanese only; furigana is not suppressed — drop ruby lines before recognition; rare kanji outside the manga distribution and the ♥ glyph are the most common residual errors. |
 | Manga-OCR | `~460 MB` | Flagship model for Japanese text & vertical writing (ViT encoder + BERT decoder, 6144 vocab). Handles vertical text and stylized lettering that PaddleOCR drops or misreads. One-time large download. |
 | Pororo OCR | `~74 MB` | Korean specialist engine ([ogkalu/pororo](https://huggingface.co/ogkalu/pororo)) utilizing Kakao Brain's TPS-VGG-BiLSTM-CTC architecture with 2,589 class vocabulary (`ocr-opt.txt`). Preprocessing resizes lines to 64px height up to 640px width with edge pixel replication padding, running in WASM CPU. |
@@ -241,8 +241,7 @@ Before translating, each region is checked against the source language: a lightw
 ## Security Hardening
 
 - **SSRF-gated image proxy:** `PROXY_IMAGE` validates every URL with `isAllowedImageUrl()` (`src/lib/security.ts`) — `http(s)` allowlist only; rejects embedded credentials, loopback/local hostnames, RFC1918 private IPs, link-local/cloud-metadata ranges, integer/hex IP bypasses, and internal schemes; `data:`/`blob:` never proxied from background. Self-check: `bun run check` via `scripts/security-selfcheck.ts`.
-- **Clean-page persistence:** page cache and series context are written only when `isCleanResult(diagnostics)` — a page with any echoed/untranslated box still produces a success Debug entry (with `untranslated` indices) but cannot poison the next prompt or be served from cache. Series context is split across `sync:context-<series>` (name, summary, dictionary, last position, `translatedCount`) and `local:context-history-<series>` (`recentHistory`), so a Sidebar/popup save that only edits settings can never clobber page history. `src/lib/series-context.ts` owns the shape, legacy `recentHistory` migration, and UTF-8 byte caps (summary/dictionary 2000 B, history entry 1200 B, history total 6000 B, max 5 entries kept newest, `lastChapterId` 512 B); `src/lib/series-context-store.ts` owns the keys, `loadSeriesContext`, `saveSeriesContextSettings`, `resetSeriesContext`, and `updateSeriesContext`. A dirty page still advances the stored position so continuity survives. Unit test: `tests/unit/series-context.test.ts`.
-- **Strict translation schemas:** `validateTranslationResult(raw, expectedCount, { sourceTexts, sourceLang, targetLang })` (`src/lib/server/validator.ts`) normalizes the shapes models actually emit — string arrays, `{text|translation|content}` items, `Box N` maps, bare arrays, single-box objects — and throws a typed `TranslationValidationError` on count/shape mismatch. It never pads, truncates, or paints `JSON.stringify()`d objects. Echoed boxes (normalized output equal to source, or ≥50% source-script share when source/target scripts are disjoint) are reported in `diagnostics.untranslated` and masked before rendering. `translateWithServer` requests `response_format.json_schema` (strict) and falls back to `json_object` on 400/422; LM Studio also has a final `none` fallback. All three backends retry once with a correction prompt on validation failure. `sourceTexts`/`context` are validated when present. Wired into `translateWithServer`, `translateLocal` (with null-content guard), and `translateWithGemini`. Self-check: `scripts/validator-selfcheck.ts` (`bun run check:validator`).
+- **Strict translation schemas:** `validateTranslationResult(raw, expectedCount)` (`src/lib/server/validator.ts`) coerces every `translations` item to a string and heals count drift — short arrays are padded with `""`, extras truncated — so one merged-away bubble cannot fail a whole page; `sourceTexts`/`context` are validated when present. Pass `{ strict: true }` to throw on mismatch instead. Wired into `translateWithServer`, `translateLocal` (with null-content guard), and `translateWithGemini`. Self-check: `scripts/validator-selfcheck.ts` (`bun run check:validator`).
 - **SHA-256 download integrity:** known-hash manifest (`src/lib/manifests/hashes.ts`) verified in `downloadArtifactHF` (`src/lib/utils.ts`) via Web Crypto; mismatch evicts the cache entry and aborts session creation. Resumable streams (`streamArtifactToCache`) additionally refuse to cache any stream ending short of its advertised length, keeping the partial for Resume instead. Self-check: `scripts/hashes-selfcheck.ts`.
 
 ## Auto-Translate Engine
@@ -395,7 +394,7 @@ the `LICENSE` appendix.
 | OCR (Japanese specialist) | Manga-OCR ONNX by mayocream / kha-white ([Hugging Face](https://huggingface.co/mayocream/manga-ocr-onnx)) | mayocream / kha-white | Apache-2.0 | ~460 MB |
 | OCR (Korean specialist) | Pororo OCR BrainOCR ONNX by Kakao Brain / ogkalu ([Hugging Face](https://huggingface.co/ogkalu/pororo)) | Kakao Brain / ogkalu | Apache-2.0 | ~74 MB |
 | Inpaint redraw (Quality mode, opt-in) | `lama-manga-dynamic.onnx` by ogkalu / dreMaz / advimman ([Hugging Face](https://huggingface.co/ogkalu/lama-manga-onnx-dynamic)) | ogkalu / dreMaz | MIT | ~207 MB |
-| Local translation | WebLLM (MLC-AI) with Llama-3.2-1B / Qwen3.5-0.8B / Qwen3.5-2B / Qwen3.5-4B | MLC-AI | Apache-2.0 | 0.8–4 GB |
+| Local translation | WebLLM (MLC-AI): Llama-3.2-1B (Llama 3.2 Community) / Qwen3.5-0.8B, 2B, 4B, 9B (Apache-2.0) / Gemma2-2B-JPN (Gemma Terms of Use) / Hermes-3-3B (Llama 3.2 Community) / Phi-4-mini (MIT) | MLC-AI | see per-model licence | 0.4–4.8 GB |
 
 > All the Model Resources is never bundled — weights download only when the
 > user explicitly selects that detector, straight from the upstream public
@@ -411,7 +410,7 @@ the `LICENSE` appendix.
 | Svelte 5 | MIT | UI runes |
 | Tailwind CSS | MIT | Styling |
 | `onnxruntime-web` | MIT | Detection / OCR / gate / LaMa inference |
-| `@mlc-ai/web-llm` | Apache-2.0 | On-device Qwen3 / Llama translation over WebGPU |
+| `@mlc-ai/web-llm` | Apache-2.0 | On-device Qwen3.5 / Llama / Gemma2-JPN / Hermes / Phi translation over WebGPU |
 | `lucide-svelte` | ISC | Icons |
 | Bun (build/dev only) | MIT | Toolchain, not shipped |
 

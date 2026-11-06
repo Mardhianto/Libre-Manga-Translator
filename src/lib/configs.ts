@@ -35,6 +35,25 @@ const ocrLangGroupMap: Record<string, string> = {
   // All other Latin-based languages will default to "latin" if not explicitly mapped
 };
 
+/** WebGPU feature a local LLM may require before `reload()` will succeed. */
+export type LlmRequiredFeature = "shader-f16";
+
+/**
+ * One selectable WebLLM model. `vram` is the *runtime* label shown next to the
+ * name; `weightMb` is the measured download footprint, so the two numbers stop
+ * being the same string (LMT-013).
+ */
+export interface LlmModelOption {
+  id: string;
+  label: string;
+  desc: string;
+  vram: string;
+  /** Sum of the model repo's weight shards, in MiB. */
+  weightMb: number;
+  /** Adapter feature WebLLM checks before loading (see `ShaderF16SupportError`). */
+  requiresFeature?: LlmRequiredFeature;
+}
+
 export const DefaultConfig = {
   currentMode: "webgpu",
   sourceLang: "Auto-Detect",
@@ -171,6 +190,7 @@ export const DefaultConfig = {
       label: "Llama-3.2-1B",
       desc: "Small — fastest, lightweight dialogue translation.",
       vram: "~880 MB",
+      weightMb: 672,
     },
     // Retained for future re-enablement if upstream WebLLM fixes Gemma 3 sliding-window attention correctness:
     // {
@@ -184,20 +204,52 @@ export const DefaultConfig = {
       label: "Qwen3.5-0.8B",
       desc: "Ultra-compact — low memory, quick responses.",
       vram: "~1.6 GB",
+      weightMb: 426,
+    },
+    {
+      id: "gemma-2-2b-jpn-it-q4f16_1-MLC",
+      label: "Gemma2-2B-JPN",
+      desc: "Japanese-tuned — best small model for JP source pages.",
+      vram: "~1.9 GB",
+      weightMb: 1424,
+      requiresFeature: "shader-f16",
     },
     {
       id: "Qwen3.5-2B-q4f16_1-MLC",
       label: "Qwen3.5-2B",
       desc: "Balanced — speed and quality for most manga.",
       vram: "~2.3 GB",
+      weightMb: 1032,
+    },
+    {
+      id: "Hermes-3-Llama-3.2-3B-q4f16_1-MLC",
+      label: "Hermes-3-3B",
+      desc: "Balanced — steadiest structured output at 3B.",
+      vram: "~2.3 GB",
+      weightMb: 1733,
     },
     {
       id: "Qwen3.5-4B-q4f16_1-MLC",
       label: "Qwen3.5-4B",
       desc: "Good — better reasoning for more complex manga.",
       vram: "~3.9 GB",
+      weightMb: 2280,
     },
-  ],
+    {
+      id: "Phi-4-mini-instruct-q4f16_1-MLC",
+      label: "Phi-4-mini",
+      desc: "Balanced — strong instruction following, larger download.",
+      vram: "~3.4 GB",
+      weightMb: 2079,
+    },
+    {
+      id: "Qwen3.5-9B-q4f16_1-MLC",
+      label: "Qwen3.5-9B",
+      desc: "Best quality — needs a GPU with 8 GB+ VRAM.",
+      vram: "~6.4 GB",
+      weightMb: 4827,
+    },
+  ] satisfies LlmModelOption[],
   // Per-model ChatConfig overrides merged onto each model's downloaded
   // mlc-chat-config.json (via ModelRecord.overrides).
   //

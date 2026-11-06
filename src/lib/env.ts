@@ -35,7 +35,7 @@ export const env = {
 
   privacyUrl:
     metaEnv.WXT_PRIVACY_URL ||
-    "https://raw.githubusercontent.com/mrdhnto/libre-manga-translator/refs/heads/main/privacy.md",
+    "https://libre.mangatl.asia/privacy.md",
 };
 
 export const hasGithubRepo = () => !!env.githubRepo;

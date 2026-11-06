@@ -37,6 +37,33 @@ export async function checkWebGPUHighPerf(): Promise<boolean> {
 }
 
 /**
+ * Probe a WebGPU adapter feature that a local LLM may declare in
+ * `ModelRecord.required_features` (currently only `shader-f16`).
+ *
+ * WebLLM throws `ShaderF16SupportError` inside `reload()` when the feature is
+ * missing, which surfaces to the user as a failed download *after* several
+ * hundred MB. Ask the adapter first so unsupported models can be hidden or
+ * disabled instead.
+ *
+ * Returns `null` when it cannot be determined (no WebGPU, probe threw) so
+ * callers keep every model visible rather than hiding them on a bad probe.
+ */
+export async function checkWebGPUFeature(feature: string): Promise<boolean | null> {
+  try {
+    const gpu = (navigator as unknown as {
+      gpu?: { requestAdapter: (opts: unknown) => Promise<{ features?: { has: (f: string) => boolean } } | null> };
+    }).gpu;
+    if (!gpu || typeof gpu.requestAdapter !== "function") return null;
+    const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+    if (!adapter) return null;
+    if (!adapter.features || typeof adapter.features.has !== "function") return null;
+    return adapter.features.has(feature);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Execution provider list for ONNX Runtime Web.
  * - When `gpu` is true: WebGPU + WASM fallback.
  * - When `gpu` is false: WASM only (MV3-safe).

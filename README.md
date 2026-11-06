@@ -20,13 +20,21 @@
 
 Translate manga in your browser with freedom to choose how. Run everything on your device, offload to the cloud, or point at your own self-hosted LLM backend - **you decide where your data goes**.
 
-> Originally based on the pipeline concept of **[ComicTL](https://github.com/kiuyha/ComicTL)** by Ketut Shridhara and routing ideas from the experimental [Local Manga Translator](https://github.com/mrdhnto/local-manga-translator) proof-of-concept. LMT is an independent, extensively rewritten evolution — modernizing the runtime, vision models, inpainting ladder, and reader workflows. See [Credits & Attribution](#credits--attribution) for full lineage.
+> Originally based on the pipeline concept of **[ComicTL](https://github.com/kiuyha/ComicTL)** by Ketut Shridhara, with routing ideas from the [`local-manga-translator`](https://github.com/mrdhnto/local-manga-translator) PoC. LMT is an independent, extensively rewritten evolution — roughly 70% of the forked source was rewritten or replaced — modernizing the runtime, vision models, inpainting ladder, and reader workflows. See [Credits & Attribution](#credits--attribution) for full lineage.
 
 ---
 
-## Three Translation Modes, Three Pipelines
+## Before You Install
 
-**Local Mode** (default, fully local) runs everything on-device. A WebLLM model (Llama-3.2-1B, Qwen3.5-0.8B, Qwen3.5-2B, or Qwen3.5-4B) translates **on the GPU via WebLLM**; bubble detection and OCR run locally too, on CPU (WASM) for the models WebGPU cannot execute — see [What runs on GPU](/docs/technical.md#what-runs-on-gpu). No API key, no account, no uploads. Works completely offline after the initial model download.
+- **The first download is large, and bigger than one number.** Local mode pulls roughly **0.8–4 GB** of LLM weights, on top of the models every mode runs on-device: a detector (~11 MB RT-DETR-v2, or ~95 MB Comic Text Detector) and, in Local and API modes, an OCR engine (~21–460 MB depending which). Opt-in neural LaMa inpainting adds ~207 MB. All downloads are opt-in, pausable, and resumable. Gemini mode is the lightest — detector only, since it runs no OCR and no local LLM.
+- **Where your data goes depends on mode** Local and API modes keep page images on your device; API mode sends extracted text only. **Gemini mode sends the whole page image — the full artwork, not a crop — to Google** using your own key. If that trade-off doesn't suit you, don't pick Gemini.
+- **No account, no telemetry, no middleman server.** Your API keys travel browser-to-provider, directly. Details in [privacy.md](privacy.md).
+
+---
+
+## Three Translation Modes, One Pipeline
+
+**Local Mode** (default, fully local) runs everything on-device. A WebLLM model (Llama-3.2-1B, Qwen3.5-0.8B, Gemma2-2B-JPN, Qwen3.5-2B, Hermes-3-3B, Qwen3.5-4B, Phi-4-mini, or Qwen3.5-9B) translates **on the GPU via WebLLM**; bubble detection and OCR run locally too, on CPU (WASM) for the models WebGPU cannot execute — see [What runs on GPU](/docs/technical.md#what-runs-on-gpu). No API key, no account, no uploads. Works completely offline after the initial model download.
 
 **Gemini Mode** (cloud, opt-in) sends the page image to Google's Gemini API, which handles both text recognition and translation in one call. It runs **no OCR and no script gate** — see the matrix below. Your API key goes straight from your browser to Google - no proxy, no middleman.
 
@@ -56,7 +64,9 @@ In Gemini mode the Debug Panel reports the gate as `off` because nothing gated. 
 
 ---
 
-## Showcase & Visual Proof
+## Showcase & Screenshots
+
+What follows shows what the pipeline produces on real pages. It is not a measured result — no detector or OCR accuracy benchmark is published for LMT; see [Before You Install (Either Project)](#before-you-install-either-project).
 
 <details open>
 <summary>📸 <b>Translation Proof: Raw vs Translated</b></summary>
@@ -127,10 +137,10 @@ Libre Manga Translator coordinates vision, OCR, translation, and inpainting thro
 ## Features
 
 ### 🎯 Translation Modes & Flexibility
-- **Full Local Pipeline (Local mode):** Comic Bubble Detector (RT-DETR, default) and Comic Text Detector run via ONNX Runtime Web. PaddleOCR extracts text on-device. Llama-3.2-1B, Qwen3.5-0.8B, Qwen3.5-2B, or Qwen3.5-4B translates via WebLLM with GPU acceleration. After the initial weights download, the entire workflow operates completely offline.
+- **Full Local Pipeline (Local mode):** Comic Bubble Detector (RT-DETR, default) and Comic Text Detector run via ONNX Runtime Web. PaddleOCR extracts text on-device. Llama-3.2-1B, Qwen3.5-0.8B, Gemma2-2B-JPN, Qwen3.5-2B, Hermes-3-3B, Qwen3.5-4B, Phi-4-mini, or Qwen3.5-9B translates via WebLLM with GPU acceleration. After the initial weights download, the entire workflow operates completely offline.
 - **Cloud Direct (Gemini):** Your browser sends the **whole page image** to Google's Gemini API using your own API key — downscaled to ≤1024 px wide, re-encoded as JPEG at quality 0.75, with each detected region drawn on it as a numbered red box so the model can answer one translation per box — plus any series summary and term dictionary you have stored. It is not a crop, and the full artwork of that page leaves the device; nothing is sent until you pick this mode and paste a key. Best for low-resource hardware without a dedicated GPU, or when you want state-of-the-art multimodal translation accuracy.
 - **API Mode (Self-Hosted):** Connect to your own LLM server running locally or across your LAN/WAN. **Sends extracted text only** — the OCR strings from each box, the target language, and your series context. No page image, and no crop, leaves the device in this mode. Supports Ollama, LM Studio, vLLM, OpenRouter, Venice AI, and any OpenAI-compatible `/v1/chat/completions` endpoint.
-- **Dual Schema Support:** Requests the strict `response_format.json_schema` (`strict: true`, exact `minItems`/`maxItems`) from OpenAI-compatible servers, automatically falling back to `json_object` on HTTP 400/422. LM Studio keeps its native `input` array + `system_prompt` shape and walks `json_schema → json_object → none` when its endpoint rejects a format.
+- **Dual Schema Support:** Seamlessly switch between standard OpenAI JSON (`response_format.json_object`) and LM Studio experimental format (`input` array + `system_prompt`) without modifying your underlying models.
 
 ### 👁️ Vision, Detection & OCR
 - **On-Device Detectors:** Choose between RT-DETR-v2 (default, 11.1 MB, fast bubble & text detection) and Comic Text Detector with pixel-mask segmentation (94.7 MB, dense bubble seeding).
@@ -227,7 +237,7 @@ After installing, jump to [First-time setup](#first-time-setup).
 Use this only to run or hack on unreleased changes. Requires [Bun](https://bun.sh).
 
 ```bash
-git clone https://github.com/mrdhnto/libre-manga-translator.git
+git clone https://github.com/mardhianto/libre-manga-translator.git
 cd libre-manga-translator
 bun install
 
@@ -262,7 +272,7 @@ Copy `.env.example` to `.env` and fill in the values before building.
 
 Open the extension popup and go through the onboarding flow, or go to **Settings** directly.
 
-- **Local Mode:** Select Local in the Home tab and download the model weights once when ready — all downloads are opt-in with pause/resume. Roughly 0.8–4 GB depending on which LLM you pick (Llama-3.2-1B, Qwen3.5-0.8B, Qwen3.5-2B, or Qwen3.5-4B).
+- **Local Mode:** Select Local in the Home tab and download the model weights once when ready — all downloads are opt-in with pause/resume. Roughly 0.4–4.8 GB depending on which LLM you pick (Llama-3.2-1B, Qwen3.5-0.8B, Gemma2-2B-JPN, Qwen3.5-2B, Hermes-3-3B, Qwen3.5-4B, Phi-4-mini, or Qwen3.5-9B).
 - **Gemini Mode:** Paste your Gemini API key (free at [aistudio.google.com](https://aistudio.google.com)), then set the mode to Gemini in the Home tab.
 - **API Mode:**
   1. Select API Mode in the Home tab
@@ -436,8 +446,8 @@ This project began as an evolution of **[ComicTL](https://github.com/kiuyha/Comi
 ### Architecture & Independent Evolution
 Following the initial fork, LMT underwent an extensive architectural rewrite (~70%+) to address browser constraints, stability, and reader ergonomics:
 - **Core Architecture & Performance** — Modular offscreen document isolation for non-blocking UI, cooperative event-loop scheduling (`scheduler.yield`), and Svelte 5 runes migration.
-- **Self-Hosted API Mode** — Native support for local/remote LLM servers (Ollama, LM Studio, OpenAI-compatible) with dual JSON schema parsing and live connection testing (ported from the experimental [Local Manga Translator](https://github.com/mrdhnto/local-manga-translator) PoC).
-- **Adaptive Inpainting Ladder** — Independent multi-stage cleaning pipeline (planar fill, bilateral denoise, Telea) and deep-learning LaMa redraw to prevent flat-patch and ghost-box artifacts (ladder and gate techniques inspired by architectural concepts in [Manga Cleaner](https://github.com/k-omiq/Bear) by KoMiQ).
+- **Self-Hosted API Mode** — Native support for local/remote LLM servers (Ollama, LM Studio, OpenAI-compatible) with dual JSON schema parsing and live connection testing (ported from the [`local-manga-translator`](https://github.com/mrdhnto/local-manga-translator) PoC).
+- **Adaptive Inpainting Ladder** — Independent multi-stage cleaning pipeline (planar fill, bilateral denoise, Telea) and deep-learning LaMa redraw to prevent flat-patch and ghost-box artifacts (ladder and gate techniques inspired by architectural concepts in [Bear](https://github.com/k-omiq/Bear) by KoMiQ, the project formerly published as Manga Cleaner).
 - **Language Verification Gate** — On-device script identification to prevent mistranslating sound effects and artwork lettering.
 - **Reader Ergonomics** — Pinned hover translation pill, continuous scroll auto-translation, in-place OCR/translation editing, and one-click image export.
 
@@ -445,7 +455,7 @@ Following the initial fork, LMT underwent an extensive architectural rewrite (~7
 
 Detection (RT-DETR, ComicTextDetector), script gate (OSD LSTM), OCR (PaddleOCR, PP-OCRv6 Manga, Manga-OCR, Pororo OCR), inpainting (Fast ladder + optional Quality LaMa), local translation (WebLLM Llama-3.2 / Qwen3.5). Built on WXT + Svelte 5 + TypeScript + Tailwind CSS (see `LICENSE` appendix for the full linked-library table).
 
-Full per-model table with sizes, licenses, and weight links: [docs/technical.md](docs/technical.md). Full upstream/technique/library attributions: [LICENSE](LICENSE) appendix.
+Full per-model table with sizes, licenses, and weight links: [docs/technical.md](docs/technical.md). Full upstream/technique/library attributions: [LICENSE](LICENSE) appendix, with verbatim upstream license texts under [`LICENSES/`](LICENSES/).
 
 ---
 
@@ -460,8 +470,11 @@ GNU Affero General Public License v3 (or later). The appendix in [LICENSE](LICEN
 lists upstream codebases, technique inspirations, linked libraries, on-demand model
 weights, and fonts.
 
-This project is a derivative work. Upstream notices are preserved in `LICENSE`:
-ComicTL codebase © 2025-2026 Ketut Shridhara (MIT — combined work conveyed under AGPL);
+This project is a derivative work. Upstream notices are preserved in `LICENSE`
+and, where a license requires its full text to travel with the work, reproduced
+verbatim under [`LICENSES/`](LICENSES/) (ComicTL's MIT text is at
+[`LICENSES/ComicTL-MIT.txt`](LICENSES/ComicTL-MIT.txt)):
+ComicTL codebase © 2025 Ketut Shridhara (MIT — combined work conveyed under AGPL);
 LMT additions © 2026 Libre Manga Translator.
 
 **Third-party model weights (on-demand, never bundled):**

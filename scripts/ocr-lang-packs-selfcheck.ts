@@ -32,8 +32,16 @@ const SUPPORTED_SET = new Set(SUPPORTED_LANG_GROUPS as readonly string[]);
 for (const lang of DefaultConfig.availableLanguages) {
   const r = resolveLangGroup(lang);
   assert(SUPPORTED_SET.has(r.group), `resolveLangGroup("${lang}") → "${r.group}" ∈ SUPPORTED`);
-  if (lang === "Auto-Detect" || lang === "Latin") {
-    assert(r.group === "latin" && r.fellBack === false, `"${lang}" → latin fellBack false`);
+  // LMT-030: "Latin" is an answer; "Auto-Detect" is a placeholder until the
+  // gate speaks, so it MUST report fellBack — the two are not the same claim.
+  if (lang === "Latin") {
+    assert(r.group === "latin" && r.fellBack === false, `"Latin" → latin fellBack false`);
+  }
+  if (lang === "Auto-Detect") {
+    assert(
+      r.group === "latin" && r.fellBack === true,
+      `"Auto-Detect" → latin placeholder with fellBack true (got ${r.group}/${r.fellBack})`,
+    );
   }
 }
 // Unknown language falls back to latin

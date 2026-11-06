@@ -1,5 +1,6 @@
 <script lang="ts">
   import { fly } from "svelte/transition";
+  import { onMount } from "svelte";
   import {
     Download,
     LoaderCircle,
@@ -10,6 +11,7 @@
   } from "lucide-svelte";
   import { DefaultConfig } from "@/lib/configs";
   import { createLlmEngine } from "@/lib/llm-engine";
+  import { checkWebGPUFeature } from "@/lib/hardware";
   import type { MLCEngine } from "@mlc-ai/web-llm";
   import { isAbortError, probeLlmsCached } from "@/lib/utils";
 
@@ -30,6 +32,20 @@
   let llmError = $state<string | null>(null);
   let llmEngine: MLCEngine | null = null;
   let cachedLlms = $state<string[]>([]);
+
+  /**
+   * null = not probed / unknown → show everything.
+   * false = adapter lacks `shader-f16` → WebLLM's `reload()` would throw
+   * `ShaderF16SupportError` after the download, so the row is disabled.
+   */
+  let hasShaderF16 = $state<boolean | null>(null);
+
+  function blockedByFeature(modelId: string): boolean {
+    if (hasShaderF16 !== false) return false;
+    return DefaultConfig.llmModels.some(
+      (m) => m.id === modelId && m.requiresFeature === "shader-f16",
+    );
+  }
   
   // Variable to track if we've checked cleaning (for effect dependency)
   let isCleaning = $state(false);
@@ -67,6 +83,10 @@
   // Check cache status on mount
   onMount(() => {
     void checkCacheStatus();
+    // Feature gate for shader-f16 models: unknown → keep every row enabled.
+    void checkWebGPUFeature("shader-f16").then((ok) => {
+      hasShaderF16 = ok;
+    });
   });
 
   async function startLlmDownload() {
@@ -146,10 +166,15 @@
   <!-- Model selection grid -->
   <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
     {#each DefaultConfig.llmModels as model}
+      {@const blocked = blockedByFeature(model.id)}
+      {@const shownSize = model.weightMb >= 1024
+        ? `~${(model.weightMb / 1024).toFixed(1)} GB`
+        : `~${model.weightMb} MB`}
       <button
         type="button"
         onclick={() => (selectedLlmModel = model.id)}
-        disabled={llmDownloading}
+        disabled={llmDownloading || blocked}
+        title={blocked ? "This GPU lacks the shader-f16 WebGPU extension" : undefined}
         class="p-3.5 rounded-xl border text-left cursor-pointer transition-all disabled:opacity-50 disabled:cursor-not-allowed bg-[var(--bg-void)]
           {selectedLlmModel === model.id
           ? 'border-[var(--accent-amber)] shadow-[0_0_14px_var(--accent-amber-glow)]'
@@ -173,6 +198,9 @@
             : 'text-[var(--text-muted)]'}"
         >
           {model.desc}
+        </p>
+        <p class="text-[10px] text-[var(--text-dim)] font-mono mt-1">
+          {shownSize} download{blocked ? " · GPU lacks shader-f16" : ""}
         </p>
       </button>
     {/each}

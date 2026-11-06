@@ -9,19 +9,6 @@ import { createAsyncResponder, keepAliveWhile, withTimeout } from "./messaging";
 import { resolveJobGuardTimeout, resolveJobTimeout } from "@/lib/timeouts";
 import { isAllowedImageUrl } from "@/lib/security";
 
-/**
- * Parse a VRAM label like "~800 MB" / "3.4 GB" into bytes for display.
- * Unknown format → 0 (formatter renders "0 B", never a wrong size).
- */
-function parseVramToBytes(vram: string | undefined): number {
-  if (!vram) return 0;
-  const m = vram.match(/([\d.]+)\s*(MB|GB)/i);
-  if (!m) return 0;
-  const n = parseFloat(m[1]);
-  if (!Number.isFinite(n)) return 0;
-  return Math.round(n * (m[2].toUpperCase() === "GB" ? 1024 ** 3 : 1024 ** 2));
-}
-
 export default defineBackground(() => {
   // ── Unified backend limiter ──────────────────────────────────────────
   // One counting semaphore shared by all pipeline backends (webgpu /
@@ -662,7 +649,9 @@ export default defineBackground(() => {
               id: `llm::${modelId}`,
               name: foundDef ? `${foundDef.label} (${modelId})` : modelId,
               category: "LLM",
-              size: parseVramToBytes(foundDef?.vram),
+              // Disk footprint, not the runtime VRAM label — different numbers,
+              // and this row is about bytes actually cached (LMT-013).
+              size: foundDef ? foundDef.weightMb * 1024 * 1024 : 0,
               cacheName: "webllm",
               url: modelId,
               isLlm: true,
