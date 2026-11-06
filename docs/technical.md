@@ -359,6 +359,8 @@ bun run check:ocr-audit # MV3 CSP audit — zero eval/new Function
 bun run test:unit       # unit test suite via bun test (SSRF, validator, boxes, telea, adapters)
 bun run test:e2e        # extension E2E suite via Playwright (service worker, popup, setup, content UI)
 bun run test            # unit + e2e tests
+bun run test:live       # opt-in live LLM suite (needs a server on :8033; start `bun run mock:llm`)
+bun run test:e2e:live   # opt-in live translation E2E (same :8033 requirement)
 bun run prepublish:check # full pre-publish gate (check -> audit -> unit -> build -> e2e -> firefox)
 bun run check:inpaint   # inpaint ladder self-check (scripts/, no framework)
 bun run check:gate      # script gate + region build self-check

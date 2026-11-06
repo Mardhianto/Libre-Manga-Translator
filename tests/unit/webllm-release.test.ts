@@ -27,12 +27,33 @@ const fakeEngine = {
   interruptGenerate: async () => {},
 };
 
+// Bun's module-mock registry is shared across the files of one `bun test` run,
+// and `mock.restore()` does not unregister a mocked module. Returning only
+// `createLlmEngine` therefore hid `llmAppConfig` from every later file that
+// imports this module (llm-models.test.ts failed with "Export named
+// 'llmAppConfig' not found" on CI, where file order differs). Spread the real
+// namespace in and override just the one factory.
+const realLlmEngine = await import("../../src/lib/llm-engine");
+
 mock.module("../../src/lib/llm-engine", () => ({
+  ...realLlmEngine,
   createLlmEngine: () => {
     created++;
     return fakeEngine;
   },
 }));
+
+// Guards the spread above: if a future edit narrows the mock back to
+// `createLlmEngine`, every other unit file that imports this module breaks.
+describe("module mock covers the real namespace", () => {
+  it("re-exports every real export, not just createLlmEngine", async () => {
+    const mocked = await import("../../src/lib/llm-engine");
+    expect(mocked).toHaveProperty("llmAppConfig");
+    for (const key of Object.keys(realLlmEngine)) {
+      expect(mocked, `mock dropped export "${key}"`).toHaveProperty(key);
+    }
+  });
+});
 
 const {
   applyMode,
