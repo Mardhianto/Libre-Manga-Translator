@@ -15,7 +15,8 @@
   } from "@/lib/configs";
   import type { MLCEngine } from "@mlc-ai/web-llm";
   import { createLlmEngine } from "@/lib/llm-engine";
-  import { isAbortError } from "@/lib/utils";
+  import { checkWebGPUFeature } from "@/lib/hardware";
+  import { isAbortError, probeLlmsCached } from "@/lib/utils";
 
   // Dynamic-only: @mlc-ai/web-llm is a multi-MB prebundled file. A static
   // import would pull it into the setup page's initial chunk and break the
@@ -42,7 +43,35 @@
   let llmCleanError = $state<string | null>(null);
   let llmEngine: MLCEngine | null = null;
 
-  onMount(() => {
+  let cachedLlms = $state<string[]>([]);
+
+  /** null = unknown → show every row; false → shader-f16 rows disabled. */
+  let hasShaderF16 = $state<boolean | null>(null);
+
+  function blockedByFeature(modelId: string): boolean {
+    if (hasShaderF16 !== false) return false;
+    return browserLlmModels.some(
+      (m) => m.id === modelId && m.requiresFeature === "shader-f16",
+    );
+  }
+
+  // Check which models are actually cached
+  async function checkCacheStatus() {
+    try {
+      const modelIds = browserLlmModels.map((m) => m.id);
+      const verified = await probeLlmsCached(modelIds);
+      cachedLlms = verified;
+      // If current selection is cached but not showing as done, mark it as done
+      if (cachedLlms.includes(selectedLlmModel) && !llmDone) {
+        llmDone = true;
+        llmError = null;
+      }
+    } catch {
+      // Probe unavailable, keep existing cache state
+    }
+  }
+
+  onMount(async () => {
     const params = new URLSearchParams(window.location.search);
     const modelParam = params.get("model");
     if (modelParam) {
@@ -51,9 +80,29 @@
       selectedLlmModel = llmModelDef(modelParam).id !== modelParam && params.get("clean") === "1"
         ? modelParam
         : llmModelDef(modelParam).id;
-      if (params.get("clean") === "1") {
-        cleanLlmModel();
-      }
+    }
+
+    // Cache probe + feature gate: unknown → keep every row enabled.
+    await checkCacheStatus();
+    hasShaderF16 = await checkWebGPUFeature("shader-f16");
+
+    if (params.get("clean") === "1") {
+      cleanLlmModel();
+    }
+  });
+
+  // Watch for model selection changes and update UI accordingly. An empty
+  // probe result means "unknown" on some hosts, so `checkLlmStatus` keeps
+  // owning the flag in that case.
+  $effect(() => {
+    if (llmDownloading || llmCleaning) return;
+    if (cachedLlms.length === 0) return;
+    if (cachedLlms.includes(selectedLlmModel)) {
+      llmDone = true;
+      llmError = null;
+    } else {
+      llmDone = false;
+      llmError = null;
     }
   });
 
@@ -225,10 +274,15 @@
 
     <div class="grid grid-cols-2 gap-2.5">
       {#each browserLlmModels as model}
+        {@const blocked = blockedByFeature(model.id)}
+        {@const shownSize = model.weightMb >= 1024
+          ? `~${(model.weightMb / 1024).toFixed(1)} GB`
+          : `~${model.weightMb} MB`}
         <button
           type="button"
           onclick={() => (selectedLlmModel = model.id)}
-          disabled={llmDownloading}
+          disabled={llmDownloading || blocked}
+          title={blocked ? "This GPU lacks the shader-f16 WebGPU extension" : undefined}
           class="p-3.5 rounded-xl border text-left cursor-pointer transition-all disabled:opacity-50 disabled:cursor-not-allowed bg-[var(--bg-void)]
             {selectedLlmModel === model.id
             ? 'border-[var(--accent-amber)] shadow-[0_0_14px_var(--accent-amber-glow)]'
@@ -254,6 +308,9 @@
               : 'text-[var(--text-muted)]'}"
           >
             {model.desc}
+          </p>
+          <p class="text-[10px] text-[var(--text-dim)] font-mono mt-1">
+            {shownSize} download{blocked ? " · GPU lacks shader-f16" : ""}
           </p>
         </button>
       {/each}

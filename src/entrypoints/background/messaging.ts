@@ -30,14 +30,22 @@ export function keepAliveWhile<T>(promise: Promise<T>): Promise<T> {
 // operation dies silently (e.g. an uncaught CSP violation crashes the offscreen
 // document mid-run). Ensures every content-script `sendMessage` await gets an
 // answer, so the overlay never sits on "Please wait..." indefinitely.
+//
+// `reportMs` lets a caller quote the real deadline it is backstopping: the
+// guard fires `grace` later than the offscreen abort, and naming the guard's
+// own delay would overstate how long the job was actually allowed to run.
 export function withTimeout<T>(
   promise: Promise<T>,
   ms: number,
   label: string,
+  reportMs = ms,
 ): Promise<T> {
   return new Promise((resolve) => {
     const timer = setTimeout(
-      () => resolve({ error: `Timed out after ${ms / 1000}s: ${label}` } as T),
+      () =>
+        resolve({
+          error: `Timed out after ${reportMs / 1000}s: ${label}`,
+        } as T),
       ms,
     );
     promise.then(

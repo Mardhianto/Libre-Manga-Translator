@@ -31,10 +31,12 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-function openAIResponse(content: unknown) {
+function openAIResponse(content: unknown, finishReason = "stop") {
   return new Response(
     JSON.stringify({
-      choices: [{ message: { content: JSON.stringify(content) } }],
+      choices: [
+        { message: { content: JSON.stringify(content) }, finish_reason: finishReason },
+      ],
     }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
@@ -239,5 +241,263 @@ describe("makeSiteRuleWithServer", () => {
     expect(format.type).toBe("json_schema");
     expect(format.json_schema.name).toBe("site_rule");
     expect(format.json_schema.schema.additionalProperties).toBe(false);
+  });
+});
+
+describe("run diagnostics (LMT-032)", () => {
+  it("reports the raw answer, stop reason, and cost of one call", async () => {
+    globalThis.fetch = (async () =>
+      openAIResponse({ translations: ["A"] })) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+    );
+
+    expect(result.diagnostics?.rawResponse).toBe('{"translations":["A"]}');
+    expect(result.diagnostics?.finishReason).toBe("stop");
+    expect(result.diagnostics?.llmCalls).toBe(1);
+    expect(result.diagnostics?.truncated).toBe(false);
+    expect(result.diagnostics?.padded).toBe(false);
+    expect(result.diagnostics?.promptChars).toBeGreaterThan(0);
+  });
+
+  it("counts the answered fallback and correction rounds as calls", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) return new Response("nope", { status: 400 });
+      if (calls === 2) return openAIResponse({ translations: ["OnlyOne"] });
+      return openAIResponse({ translations: ["A", "B"] });
+    }) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは", "さようなら"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+    );
+
+    // Three HTTP attempts, but the 400 never reached the model, so only the two
+    // answers count as LLM work.
+    expect(calls).toBe(3);
+    expect(result.diagnostics?.llmCalls).toBe(2);
+    // Baseline page cost, not the longer correction prompt.
+    expect(result.diagnostics?.promptChars).toBeGreaterThan(0);
+  });
+
+  it("flags a length stop reason as truncated", async () => {
+    globalThis.fetch = (async () =>
+      openAIResponse({ translations: ["A"] }, "length")) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+    );
+
+    expect(result.diagnostics?.finishReason).toBe("length");
+    expect(result.diagnostics?.truncated).toBe(true);
+  });
+
+  it("stamps run facts onto a thrown parse error", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "{\"translations\": [\"A\"" }, finish_reason: "length" }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as unknown as typeof fetch;
+
+    const error = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+    ).catch((e) => e);
+
+    // The raw cut-off answer is the whole diagnosis for a parse failure.
+    expect(error).toBeInstanceOf(Error);
+    expect(error.lmtDiagnostics?.finishReason).toBe("length");
+    expect(error.lmtDiagnostics?.rawResponse).toContain('"translations"');
+  });
+});
+
+describe("retry predicate (LMT-027)", () => {
+  it("does not re-send a request whose answer failed to parse", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"translations": ["A"' }, finish_reason: "length" }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    await expect(
+      translateWithServer(
+        ["こんにちは"],
+        "English",
+        "Japanese",
+        undefined,
+        openaiConfig,
+      ),
+    ).rejects.toBeInstanceOf(Error);
+
+    // A cut-off answer reproduces identically: the second attempt would only
+    // burn another inference and bury the truncation in the debug log.
+    expect(calls).toBe(1);
+  });
+
+  it("still retries once on a 5xx", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) return new Response("boom", { status: 503 });
+      return openAIResponse({ translations: ["A"] });
+    }) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+    );
+
+    expect(result.translations).toEqual(["A"]);
+    expect(calls).toBe(2);
+  });
+
+  it("does not retry when the job is already cancelled", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return new Response("boom", { status: 503 });
+    }) as unknown as typeof fetch;
+
+    const controller = new AbortController();
+    controller.abort(new DOMException("Timed out after 180s: TRANSLATE_IMAGE", "AbortError"));
+
+    const error = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+      undefined,
+      controller.signal,
+    ).catch((e) => e);
+
+    // No request, no retry: the deadline already passed.
+    expect(calls).toBe(0);
+    // The caller's reason survives, so the stage name reaches the UI.
+    expect(error.message).toContain("Timed out after 180s: TRANSLATE_IMAGE");
+  });
+
+  it("still retries once on a 429", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) return new Response("slow down", { status: 429 });
+      return openAIResponse({ translations: ["A"] });
+    }) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+    );
+
+    expect(result.translations).toEqual(["A"]);
+    expect(calls).toBe(2);
+  });
+
+  it("still retries a transport failure", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) throw new TypeError("Failed to fetch");
+      return openAIResponse({ translations: ["A"] });
+    }) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+    );
+
+    expect(result.translations).toEqual(["A"]);
+    expect(calls).toBe(2);
+  });
+
+  it("passes the abort signal to fetch", async () => {
+    let seen: AbortSignal | undefined;
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      seen = init?.signal ?? undefined;
+      return openAIResponse({ translations: ["A"] });
+    }) as unknown as typeof fetch;
+
+    const controller = new AbortController();
+    await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+      undefined,
+      controller.signal,
+    );
+
+    expect(seen).toBe(controller.signal);
+  });
+});
+
+describe("auto-detect prompt clause (LMT-030)", () => {
+  it("names the auto-detected script when the gate picked one", () => {
+    const { systemPrompt } = buildTranslationPrompts(
+      ["こんにちは"],
+      "English",
+      "Auto-Detect",
+      undefined,
+      "Japanese",
+    );
+    expect(systemPrompt).toContain("FROM JAPANESE (auto-detected script)");
+  });
+
+  it("does not imply English when nothing was detected", () => {
+    const { systemPrompt } = buildTranslationPrompts(
+      ["こんにちは"],
+      "English",
+      "Auto-Detect",
+      undefined,
+      null,
+    );
+    expect(systemPrompt).toContain(
+      "FROM the source language of the text in each box",
+    );
+  });
+
+  it("keeps the explicit source verbatim", () => {
+    const { systemPrompt } = buildTranslationPrompts(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+    );
+    expect(systemPrompt).toContain("FROM JAPANESE INTO ENGLISH");
+    expect(systemPrompt).not.toContain("auto-detected");
   });
 });

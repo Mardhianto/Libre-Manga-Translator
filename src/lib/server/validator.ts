@@ -72,6 +72,106 @@ export interface ValidateOptions {
   sourceTexts?: string[];
   sourceLang?: string;
   targetLang?: string;
+  /**
+   * What the backend learned about the request itself (LMT-032): the raw
+   * answer, its stop reason, and how much prompt was sent. Kept separate from
+   * validation because validation must stay a pure shape check.
+   */
+  run?: LlmRunInfo;
+}
+
+/**
+ * Facts about one LLM round-trip, collected by the backend that made it.
+ * All optional: a caller that cannot report them must not fabricate them.
+ */
+export interface LlmRunInfo {
+  /** Model answer before parsing; clipped by `clipRawResponse`. */
+  rawResponse?: string;
+  /** Provider stop reason ("stop", "length", "MAX_TOKENS", …). */
+  finishReason?: string;
+  /** Characters sent: system prompt + user prompt. */
+  promptChars?: number;
+  /** LLM requests spent on this page (format fallbacks + correction round). */
+  llmCalls?: number;
+}
+
+/** Raw answers are capped before they reach storage: 50 debug entries × a
+ *  whole answer would blow past the `local:` budget for no diagnostic gain. */
+export const RAW_RESPONSE_LIMIT = 4096;
+
+export function clipRawResponse(content: string | null | undefined): string {
+  const text = typeof content === "string" ? content : "";
+  return text.length <= RAW_RESPONSE_LIMIT
+    ? text
+    : `${text.slice(0, RAW_RESPONSE_LIMIT)}…[${text.length - RAW_RESPONSE_LIMIT} chars cut]`;
+}
+
+export function promptChars(
+  systemPrompt: string,
+  userPrompt: string,
+): number {
+  return systemPrompt.length + userPrompt.length;
+}
+
+/** Provider stop reasons that mean the answer was cut by the output cap. */
+export function isTruncatedFinishReason(
+  reason: string | undefined,
+): boolean {
+  if (!reason) return false;
+  const normalized = reason.toLowerCase();
+  return (
+    normalized === "length" ||
+    normalized === "max_tokens" ||
+    normalized === "max_output_tokens" ||
+    normalized === "max_output" ||
+    normalized === "token_limit"
+  );
+}
+
+/**
+ * Fold per-call facts into one page-level record (last call wins on reason).
+ *
+ * `llmCalls` is the number of round-trips, not a caller-supplied number: a
+ * backend that reports two facts must not be able to claim one call.
+ */
+export function mergeRunInfo(calls: LlmRunInfo[]): LlmRunInfo {
+  if (calls.length === 0) return {};
+  const last = calls[calls.length - 1];
+  return {
+    rawResponse: last.rawResponse,
+    finishReason: last.finishReason,
+    // The first call's prompt is the page's baseline; the correction prompt is
+    // longer and would overstate what a normal page costs.
+    promptChars: calls[0].promptChars,
+    llmCalls: calls.length,
+  };
+}
+
+/**
+ * Attach diagnostics to a thrown error.
+ *
+ * Parse and transport failures are exactly the cases where the raw answer
+ * matters most (a truncated page throws before validation ever runs), so the
+ * backend stamps what it knows onto the error and the content script reads it
+ * back with `diagnosticsFromError`. Non-object errors are returned untouched.
+ */
+export function attachDiagnostics<T>(error: T, run: LlmRunInfo): T {
+  if (error && typeof error === "object") {
+    Object.defineProperty(error, "lmtDiagnostics", {
+      value: mergeRunInfo([run]),
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return error;
+}
+
+export function diagnosticsFromError(
+  error: unknown,
+): LlmRunInfo | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  return (error as { lmtDiagnostics?: LlmRunInfo }).lmtDiagnostics;
 }
 
 const TEXT_KEYS = [
@@ -184,6 +284,7 @@ export function validateTranslationResult(
     options?.targetLang,
   );
 
+  const run = options?.run;
   return {
     translations,
     sourceTexts,
@@ -193,6 +294,20 @@ export function validateTranslationResult(
       receivedCount: translations.length,
       untranslated,
       clean: untranslated.length === 0,
+      ...(run
+        ? {
+            rawResponse: run.rawResponse
+              ? clipRawResponse(run.rawResponse)
+              : undefined,
+            finishReason: run.finishReason,
+            promptChars: run.promptChars,
+            llmCalls: run.llmCalls,
+            truncated: isTruncatedFinishReason(run.finishReason),
+            // This validator never invents entries; the flag exists so the
+            // Debug export can prove that in one line (LMT-032).
+            padded: false,
+          }
+        : {}),
     },
   };
 }

@@ -6,20 +6,8 @@ import { DefaultConfig, SUPPORTED_LANG_GROUPS, normalizeDetectionModel, resolveL
 import { UNKNOWN_DETECTION_MODEL_MESSAGE } from "@/lib/detections/main";
 import { testServerConnection } from "@/lib/server/main";
 import { createAsyncResponder, keepAliveWhile, withTimeout } from "./messaging";
+import { resolveJobGuardTimeout, resolveJobTimeout } from "@/lib/timeouts";
 import { isAllowedImageUrl } from "@/lib/security";
-
-/**
- * Parse a VRAM label like "~800 MB" / "3.4 GB" into bytes for display.
- * Unknown format → 0 (formatter renders "0 B", never a wrong size).
- */
-function parseVramToBytes(vram: string | undefined): number {
-  if (!vram) return 0;
-  const m = vram.match(/([\d.]+)\s*(MB|GB)/i);
-  if (!m) return 0;
-  const n = parseFloat(m[1]);
-  if (!Number.isFinite(n)) return 0;
-  return Math.round(n * (m[2].toUpperCase() === "GB" ? 1024 ** 3 : 1024 ** 2));
-}
 
 export default defineBackground(() => {
   // ── Unified backend limiter ──────────────────────────────────────────
@@ -107,6 +95,19 @@ export default defineBackground(() => {
     }
     return ensureFirefoxInferencePage().then(forward);
   }
+
+  // Leaving Local mode must free WebLLM VRAM instead of leaving it resident in
+  // the offscreen document for the rest of the session (LMT-029). The offscreen
+  // hook decides whether the switch is a no-op (Gemini <-> API).
+  storage.watch<string>("sync:current-mode", (mode) => {
+    void (async () => {
+      try {
+        await forwardToInference({ type: "OFFSCREEN_MODE_CHANGED", data: { mode } });
+      } catch {
+        // No inference document means no engine to release.
+      }
+    })();
+  });
 
   // ── Central resumable download manager ─────────────────────────────
   // Single owner for every ONNX weight download (setup wizard, popup
@@ -494,27 +495,22 @@ export default defineBackground(() => {
         msg.type,
       )
     ) {
-      // Quality (LaMa) runs on wasm CPU (~30s+ per 512px tile), so a Quality
-      // inpaint over N regions needs a per-region budget, not a flat page budget.
-      const inpaintBoxes = Array.isArray(msg.data?.bboxes)
-        ? msg.data.bboxes.length
-        : 0;
-      const isLocalTranslate =
-        msg.type === "TRANSLATE_IMAGE" &&
-        (msg.config?.currentMode === "webgpu" || !msg.config?.currentMode);
-      const timeoutMs =
-        msg.type === "INPAINT_IMAGE" && msg.data?.method === "quality"
-          ? Math.max(300_000, inpaintBoxes * 60_000)
-          : isLocalTranslate
-            ? 480_000
-            : msg.type === "TRANSLATE_IMAGE" || msg.type === "INPAINT_IMAGE"
-              ? 180_000
-              : 90_000;
+      const timeoutMs = resolveJobTimeout({
+        type: msg.type,
+        mode: msg.config?.currentMode,
+        boxes: Array.isArray(msg.data?.bboxes) ? msg.data.bboxes.length : 0,
+        method: msg.data?.method,
+      });
 
+      // The offscreen document owns the deadline and aborts the request when
+      // it passes (LMT-010). This guard exists only for the case where the
+      // document died mid-job and never replies; it must therefore start
+      // after the real deadline, so a healthy slow job is never released early.
       const forward = () =>
         forwardToInference({
           ...msg,
           type: `OFFSCREEN_${msg.type}`,
+          timeoutMs,
         });
 
       const run = async () => {
@@ -522,8 +518,9 @@ export default defineBackground(() => {
         try {
           return await withTimeout(
             forward(),
-            timeoutMs,
+            resolveJobGuardTimeout(timeoutMs),
             msg.type,
+            timeoutMs,
           );
         } finally {
           release();
@@ -690,7 +687,7 @@ export default defineBackground(() => {
           const items = await storage.getItems(["local:cached-llms"]);
           const cachedLlms = (items[0]?.value as string[]) || [];
           for (const modelId of cachedLlms) {
-            const foundDef = (DefaultConfig.llmModels as { id: string; label: string; vram?: string; engine?: string; bytes?: number }[]).find((m) => m.id === modelId);
+            const foundDef = (DefaultConfig.llmModels as { id: string; label: string; vram?: string; engine?: string; weightMb?: number }[]).find((m) => m.id === modelId);
             // wllama GGUF models are enumerated from their CacheStorage
             // entry above (real blob size) — skip here to avoid duplicates.
             if (foundDef?.engine === "wllama") continue;
@@ -698,7 +695,9 @@ export default defineBackground(() => {
               id: `llm::${modelId}`,
               name: foundDef ? `${foundDef.label} (${modelId})` : modelId,
               category: "LLM",
-              size: foundDef?.bytes ?? parseVramToBytes(foundDef?.vram),
+              // Disk footprint, not the runtime VRAM label — different numbers,
+              // and this row is about bytes actually cached (LMT-013).
+              size: foundDef ? (foundDef.weightMb ?? 0) * 1024 * 1024 : 0,
               cacheName: "webllm",
               url: modelId,
               isLlm: true,

@@ -3,9 +3,29 @@
   import { DEFAULT_GPU_STATE, normalizeGpuState, type GpuState } from "@/lib/hardware";
   import { LoaderCircle, Cpu, Zap } from "lucide-svelte";
 
-  let gpu = $state<GpuState>({ ...DEFAULT_GPU_STATE });
+  // Deep copy: the overrides nested object must not alias `DEFAULT_GPU_STATE`,
+  // which `gpu-runtime` also holds as its fallback state.
+  const freshState = (): GpuState => ({
+    ...DEFAULT_GPU_STATE,
+    webgpuOverrides: { ...DEFAULT_GPU_STATE.webgpuOverrides },
+  });
+
+  let gpu = $state<GpuState>(freshState());
   let loading = $state(true);
   let probing = $state(false);
+  // Snapshot of the last persisted state. The `$effect` below must not re-save
+  // on load (that would broadcast a GPU_STATE_CHANGED every time the panel is
+  // opened, and now also release the local LLM), so compare against this.
+  let saved = "";
+
+  const signature = (state: GpuState) =>
+    JSON.stringify([
+      state.webgpuMaster,
+      state.webgpuOverrides.llm,
+      state.webgpuOverrides.inpaint,
+      state.webgpuOverrides.ocr,
+      state.webgpuOverrides.detection,
+    ]);
 
   async function load() {
     try {
@@ -20,6 +40,7 @@
         webgpuOverrides: items.find((i) => i.key === "sync:webgpu-overrides")?.value as GpuState["webgpuOverrides"] | undefined,
       };
       gpu = normalizeGpuState(raw);
+      saved = signature(gpu);
     } finally {
       loading = false;
     }
@@ -30,6 +51,7 @@
       { key: "sync:webgpu-master", value: gpu.webgpuMaster },
       { key: "sync:webgpu-overrides", value: $state.snapshot(gpu.webgpuOverrides) },
     ]);
+    saved = signature(gpu);
     // Best-effort notify offscreen to re-evaluate providers
     try {
       await browser.runtime.sendMessage({ type: "GPU_STATE_CHANGED", data: $state.snapshot(gpu) });
@@ -54,13 +76,12 @@
 
   onMount(() => load());
 
-  // Persist when toggles change (after initial load)
+  // Persist when toggles change (after initial load). The signature guard keeps
+  // an unchanged state from re-broadcasting GPU_STATE_CHANGED — otherwise just
+  // opening this panel would drop every ORT session and the local LLM.
   $effect(() => {
     if (loading) return;
-    gpu.webgpuMaster;
-    gpu.webgpuOverrides.llm;
-    gpu.webgpuOverrides.inpaint;
-    gpu.webgpuOverrides.ocr;
+    if (signature(gpu) === saved) return;
     save();
   });
 </script>
@@ -128,7 +149,8 @@
       {#if gpu.webgpuMaster && gpu.webgpuSupported !== false}
         <div class="space-y-1 pt-1">
           {#each [
-            { key: "ocr" as const, label: "Text detection", hint: "PaddleOCR rec/detect · ~30 MB" },
+            { key: "detection" as const, label: "Text detection", hint: "RT-DETR / ComicTextDetector · ~80 MB" },
+            { key: "ocr" as const, label: "Text recognition", hint: "PaddleOCR · manga-ocr · Pororo · gate" },
             { key: "inpaint" as const, label: "Image cleaning", hint: "LaMa / Telea · 0–200 MB" },
             { key: "llm" as const, label: "Translation", hint: "Qwen3 · 3–6 GB VRAM" },
           ] as item}

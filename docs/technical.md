@@ -43,7 +43,7 @@ Developer-facing details for Libre Manga Translator: models, settings, pipeline 
 | Script gate | OSD script-identification LSTM (~3.7 MB, ONNX Runtime Web) + Unicode-block text verification |
 | On-device OCR | PaddleOCR ONNX (`~90 MB` Latin + Chinese/Japanese packs, multilingual default), PP-OCRv6 Manga ONNX (`~21 MB`, Japanese-only manga fine-tune), Manga-OCR ONNX (`~460 MB`, Japanese flagship), or Pororo OCR ONNX (`~74 MB`, Korean specialist) |
 | Inpainting | Fast model-free engine ladder (Rung 0: Planar fill, Rung 1: Bilateral denoise, Rung 2: Telea) + independent Quality mode (standalone neural LaMa redraw, `~207 MB`, with Fast ladder fallback) |
-| Local translation | Chrome: [WebLLM](https://webllm.mlc.ai/) (Llama-3.2-1B / Qwen3.5-0.8B / Qwen3.5-2B / Qwen3.5-4B) · Firefox: [wllama](https://github.com/ngxson/wllama) (Qwen3.5-4B / Tiny Aya GGUF) |
+| Local translation | Chrome: [WebLLM](https://webllm.mlc.ai/) (Llama-3.2-1B / Qwen3.5-0.8B / Gemma2-2B-JPN / Qwen3.5-2B / Hermes-3-3B / Qwen3.5-4B / Phi-4-mini / Qwen3.5-9B) - Firefox: [wllama](https://github.com/ngxson/wllama) (Qwen3.5-4B / Tiny Aya Global / Tiny Aya Fire GGUF) |
 | Cloud translation | Gemini API via REST |
 | API Mode backends | Ollama, LM Studio, OpenAI-compatible |
 | Storage | WXT storage (wraps chrome.storage); model weights in browser cache (see below) |
@@ -86,7 +86,7 @@ title + summary + dictionary
 + last 5 translations"]
     Ctx --> LLM{LLM Backend?}
 
-    LLM -->|Local| WebLLM["WebLLM - Llama-3.2-1B / Qwen3.5
+    LLM -->|Local| WebLLM["WebLLM - Llama-3.2-1B / Qwen3.5 / Gemma2-JPN
 GPU accelerated where WebLLM supports it"]
     LLM -->|API| Server["Self-Hosted Server
 Ollama / LM Studio / OpenAI-compatible"]
@@ -138,8 +138,8 @@ WebGPU mode runs fully on-device. The engine is per-browser (Firefox-only swap �
 
 | Build | Engine | Models | Weights | Backend code |
 |---|---|---|---|---|
-| Chrome | WebLLM (`@mlc-ai/web-llm`) | Gemma3-1B / Qwen3.5-2B / Qwen3.5-4B `q4f16_1-MLC` | 0.8–4 GB via WebLLM cache | `src/lib/webllm.ts` |
-| Firefox | wllama (`@wllama/wllama`, MIT) | Qwen3.5-4B `Q3_K_M` / Tiny Aya Global `q4_k_m` GGUF | ~2.1 / ~2.0 GB (`unsloth/Qwen3.5-4B-GGUF` via env `WXT_GGUF_MODEL_REPO`, `CohereLabs/tiny-aya-global-GGUF`) via shared CacheStorage | `src/lib/wllama.ts` |
+| Chrome | WebLLM (`@mlc-ai/web-llm`) | Llama-3.2-1B / Qwen3.5-0.8B / Gemma2-2B-JPN / Qwen3.5-2B / Hermes-3-3B / Qwen3.5-4B / Phi-4-mini / Qwen3.5-9B `q4f16_1-MLC` | 0.4–4.8 GB via WebLLM cache | `src/lib/webllm.ts` |
+| Firefox | wllama (`@wllama/wllama`, MIT) | Qwen3.5-4B `Q3_K_M` / Tiny Aya Global `q4_k_m` / Tiny Aya Fire `q4_k_m` GGUF | ~2.1 / ~2.0 / ~2.0 GB (`unsloth/Qwen3.5-4B-GGUF` via env `WXT_GGUF_MODEL_REPO`, `CohereLabs/tiny-aya-*`) via shared CacheStorage | `src/lib/wllama.ts` |
 
 Selection: `llmModelDef()` / `visibleLlmModels()` in `src/lib/configs.ts` (stored `sync:llm-model` ids resolve with cross-engine fallback); the shared handlers route in `translateLocalRouted` / `makeSiteRuleLocalRouted` (`src/lib/inference.ts`, executed in the offscreen document on Chrome and in `offscreen.html` inside a hidden background-page iframe on Firefox). Both backends serve the same `TranslateResult` shape with the same `response_format` JSON-schema contract (`json_schema` on wllama, `json_object` fallback, then unconstrained + `parseLlmJson`), validated by `validateTranslationResult`; Qwen thinking mode is disabled via `chat_template_kwargs` when the template supports it. GGUF download/delete flows through the existing model-cache plumbing (`fetchAndCacheWithProgress`, `local:cached-llms`, Model Storage UI), so no new storage keys were needed. Per-request token stats (`LlmPerf`) and WebGPU-fallback reasons surface in the debug log.
 
@@ -158,7 +158,7 @@ Two selectable detectors. Switch in **Vision › Detection › Model Selection**
 | Model | Size | License | Notes |
 |---|---|---|---|
 | Comic Bubble Detector (RT-DETR-v2, default) | 11.1 MB | Apache-2.0 | `ogkalu/comic-text-and-bubble-detector`. Detects `bubble`, `text_bubble`, `text_free`. Good at bubbles and free-floating text. |
-| Comic Text Detector & Segmentation | 94.7 MB | GPL-3.0 | `comictextdetector.pt.onnx` (dmMaze via manga-image-translator beta-0.3). Returns text boxes plus a per-pixel segmentation mask (`[1, 1, 1024, 1024]`) upsampled to page resolution; `buildSegmentationSeed` seeds `fitMask()` directly from the mask, falling back to `buildInkSeed` when absent. Tiles tall/oversized pages with the shared sliding-window policy; tile masks composite into one page mask with per-pixel max. |
+| Comic Text Detector & Segmentation | 94.7 MB | GPL-3.0 | `comictextdetector.pt.onnx` (dmMaze via manga-image-translator beta-0.3). Returns text boxes plus a per-pixel segmentation mask (`[1, 1, 1024, 1024]`) upsampled to page resolution; `buildSegmentationSeed` seeds `fitMask()` directly from the mask, falling back to `buildInkSeed` when absent. |
 
 Unknown model ids throw `UNKNOWN_DETECTION_MODEL_MESSAGE` with setup-wizard directions.
 
@@ -255,7 +255,7 @@ Before translating, each region is checked against the source language: a lightw
 ## Security Hardening
 
 - **SSRF-gated image proxy:** `PROXY_IMAGE` validates every URL with `isAllowedImageUrl()` (`src/lib/security.ts`) — `http(s)` allowlist only; rejects embedded credentials, loopback/local hostnames, RFC1918 private IPs, link-local/cloud-metadata ranges, integer/hex IP bypasses, and internal schemes; `data:`/`blob:` never proxied from background. Self-check: `bun run check` via `scripts/security-selfcheck.ts`.
-- **Strict translation schemas:** `validateTranslationResult(raw, expectedCount, { sourceTexts, sourceLang, targetLang })` (`src/lib/server/validator.ts`) normalizes the shapes models actually emit — string arrays, `{text|translation|content}` items, `Box N` maps, bare arrays, single-box objects — and throws a typed `TranslationValidationError` on count/shape mismatch. It never pads, truncates, or paints `JSON.stringify()`d objects. Echoed boxes (normalized output equal to source, or ≥50% source-script share when source/target scripts are disjoint) are reported in `diagnostics.untranslated` and masked before rendering. `translateWithServer` requests `response_format.json_schema` (strict) and falls back to `json_object` on 400/422; LM Studio also has a final `none` fallback. All three backends retry once with a correction prompt on validation failure. `sourceTexts`/`context` are validated when present. Wired into `translateWithServer`, `translateLocal` (with null-content guard), and `translateWithGemini`. Self-check: `scripts/validator-selfcheck.ts` (`bun run check:validator`).
+- **Strict translation schemas:** `validateTranslationResult(raw, expectedCount)` (`src/lib/server/validator.ts`) coerces every `translations` item to a string and heals count drift — short arrays are padded with `""`, extras truncated — so one merged-away bubble cannot fail a whole page; `sourceTexts`/`context` are validated when present. Pass `{ strict: true }` to throw on mismatch instead. Wired into `translateWithServer`, `translateLocal` (with null-content guard), and `translateWithGemini`. Self-check: `scripts/validator-selfcheck.ts` (`bun run check:validator`).
 - **SHA-256 download integrity:** known-hash manifest (`src/lib/manifests/hashes.ts`) verified in `downloadArtifactHF` (`src/lib/utils.ts`) via Web Crypto; mismatch evicts the cache entry and aborts session creation. Resumable streams (`streamArtifactToCache`) additionally refuse to cache any stream ending short of its advertised length, keeping the partial for Resume instead. Self-check: `scripts/hashes-selfcheck.ts`.
 
 ## Auto-Translate Engine
@@ -264,7 +264,11 @@ Orchestrator `src/entrypoints/content/auto-translate.ts` (`AutoTranslateOrchestr
 
 ## GPU Controls
 
-Shared probe and state live in `src/lib/hardware.ts` (LMT-authored): `checkWebGPUHighPerf()` requests a `high-performance` adapter and caches `true` only (`local:webgpu-supported`); `normalizeGpuState()` merges master + per-area overrides; `resolveExecutionProviders()` returns WebGPU-first or WASM-only; `resolveExecutionProvidersForModel()` additionally gates known-bad operators down to WASM. UI: `src/lib/components/settings/GpuAccelerationPanel.svelte` (master `sync:webgpu-master` + `sync:webgpu-overrides {llm,inpaint,ocr}` + re-check probe) in sidebar **System** tab. Background/offscreen handlers: `CHECK_WEBGPU_SUPPORT`, `GPU_STATE_CHANGED`, `OFFSCREEN_*` prefetch/probe.
+Shared probe and state live in `src/lib/hardware.ts` (LMT-authored): `checkWebGPUHighPerf()` requests a `high-performance` adapter and caches `true` only (`local:webgpu-supported`); `normalizeGpuState()` merges master + per-area overrides; `isGpuEnabledFor()` resolves one stage against `master && override` and treats a never-probed (`null`) device as "unknown" instead of "unsupported"; `resolveExecutionProviders()` returns WebGPU-first or WASM-only; `resolveExecutionProvidersForModel()` additionally gates known-bad operators down to WASM.
+
+The persisted state is read into the offscreen document by `src/lib/gpu-runtime.ts` (`ensureGpuState()`, `gpuEnabledFor(key)`, `refreshGpuState()`), and each loader passes the resulting boolean explicitly: detection (`detections/main.ts`, including the ComicTextDetector URL path), recognition (`ocr/paddle.ts`, `ocr/manga-ocr.ts`, `ocr/pororo.ts`), script gate (`gate/osd.ts`), and LaMa (`inpaint/lama.ts`). Without this the toggles were saved and broadcast by the panel but read by nobody, so every session fell back to "GPU if `navigator.gpu` exists". `downloadArtifactHF` now logs the effective provider once per session as `[ort] <artifact> → webgpu+wasm` (or `→ wasm`), which is the only place the choice is visible because ORT exposes no public `.providers`.
+
+UI: `src/lib/components/settings/GpuAccelerationPanel.svelte` (master `sync:webgpu-master` + `sync:webgpu-overrides {llm,inpaint,ocr,detection}` + re-check probe) in sidebar **System** tab. `llm` covers WebLLM, `ocr` covers recognition + gate, `detection` covers the detector, `inpaint` covers LaMa. The panel only writes when a toggle actually changed, so merely opening Settings no longer re-broadcasts and drops live sessions. Background/offscreen handlers: `CHECK_WEBGPU_SUPPORT`, `GPU_STATE_CHANGED` / `OFFSCREEN_GPU_STATE_CHANGED` (adopt toggles, release every hardware-bound session, and unload WebLLM when `llm` just went off), `OFFSCREEN_MODE_CHANGED` (leaving Local frees WebLLM VRAM; Gemini ↔ API is a no-op), `OFFSCREEN_*` prefetch/probe.
 
 ### What runs on GPU
 
@@ -408,7 +412,7 @@ the `LICENSE` appendix.
 | OCR (Japanese specialist) | Manga-OCR ONNX by mayocream / kha-white ([Hugging Face](https://huggingface.co/mayocream/manga-ocr-onnx)) | mayocream / kha-white | Apache-2.0 | ~460 MB |
 | OCR (Korean specialist) | Pororo OCR BrainOCR ONNX by Kakao Brain / ogkalu ([Hugging Face](https://huggingface.co/ogkalu/pororo)) | Kakao Brain / ogkalu | Apache-2.0 | ~74 MB |
 | Inpaint redraw (Quality mode, opt-in) | `lama-manga-dynamic.onnx` by ogkalu / dreMaz / advimman ([Hugging Face](https://huggingface.co/ogkalu/lama-manga-onnx-dynamic)) | ogkalu / dreMaz | MIT | ~207 MB |
-| Local translation | WebLLM (MLC-AI) with Llama-3.2-1B / Qwen3.5-0.8B / Qwen3.5-2B / Qwen3.5-4B (Chrome builds) · wllama (llama.cpp WASM, MIT) with Qwen3.5-4B / Tiny Aya GGUF (Firefox builds; runtime `wllama.wasm` bundled, never CDN) | Apache-2.0 | 0.8–4 GB |
+| Local translation | WebLLM (MLC-AI) with Llama-3.2-1B / Qwen3.5-0.8B / Gemma2-2B-JPN / Qwen3.5-2B / Hermes-3-3B / Qwen3.5-4B / Phi-4-mini / Qwen3.5-9B (Chrome builds) - wllama (llama.cpp WASM, MIT) with Qwen3.5-4B / Tiny Aya Global / Tiny Aya Fire GGUF (Firefox builds; runtime `wllama.wasm` bundled, never CDN) | MLC-AI / ngxson | see per-model licence | 0.4-4.8 GB |
 
 > All the Model Resources is never bundled — weights download only when the
 > user explicitly selects that detector, straight from the upstream public

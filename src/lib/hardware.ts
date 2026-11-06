@@ -37,6 +37,33 @@ export async function checkWebGPUHighPerf(): Promise<boolean> {
 }
 
 /**
+ * Probe a WebGPU adapter feature that a local LLM may declare in
+ * `ModelRecord.required_features` (currently only `shader-f16`).
+ *
+ * WebLLM throws `ShaderF16SupportError` inside `reload()` when the feature is
+ * missing, which surfaces to the user as a failed download *after* several
+ * hundred MB. Ask the adapter first so unsupported models can be hidden or
+ * disabled instead.
+ *
+ * Returns `null` when it cannot be determined (no WebGPU, probe threw) so
+ * callers keep every model visible rather than hiding them on a bad probe.
+ */
+export async function checkWebGPUFeature(feature: string): Promise<boolean | null> {
+  try {
+    const gpu = (navigator as unknown as {
+      gpu?: { requestAdapter: (opts: unknown) => Promise<{ features?: { has: (f: string) => boolean } } | null> };
+    }).gpu;
+    if (!gpu || typeof gpu.requestAdapter !== "function") return null;
+    const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+    if (!adapter) return null;
+    if (!adapter.features || typeof adapter.features.has !== "function") return null;
+    return adapter.features.has(feature);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Execution provider list for ONNX Runtime Web.
  * - When `gpu` is true: WebGPU + WASM fallback.
  * - When `gpu` is false: WASM only (MV3-safe).
@@ -99,13 +126,19 @@ export interface GpuState {
     llm: boolean;
     inpaint: boolean;
     ocr: boolean;
+    /**
+     * Detection is its own stage (RT-DETR / ComicTextDetector), separate from
+     * OCR recognition. It used to share the `ocr` toggle, which meant turning
+     * off recognition also forced the detector to CPU (LMT-028).
+     */
+    detection: boolean;
   };
 }
 
 export const DEFAULT_GPU_STATE: GpuState = {
   webgpuSupported: null,
   webgpuMaster: true,
-  webgpuOverrides: { llm: true, inpaint: true, ocr: true },
+  webgpuOverrides: { llm: true, inpaint: true, ocr: true, detection: true },
 };
 
 /**
@@ -122,13 +155,30 @@ export function normalizeGpuState(raw: Partial<GpuState> | undefined | null): Gp
       llm: raw?.webgpuOverrides?.llm ?? DEFAULT_GPU_STATE.webgpuOverrides.llm,
       inpaint: raw?.webgpuOverrides?.inpaint ?? DEFAULT_GPU_STATE.webgpuOverrides.inpaint,
       ocr: raw?.webgpuOverrides?.ocr ?? DEFAULT_GPU_STATE.webgpuOverrides.ocr,
+      detection: raw?.webgpuOverrides?.detection ?? DEFAULT_GPU_STATE.webgpuOverrides.detection,
     },
   };
 }
 
-/** Effective GPU flag for a subsystem (`master && per-subsystem`). */
-export function isGpuEnabledFor(state: GpuState, key: keyof GpuState["webgpuOverrides"]): boolean {
-  return state.webgpuSupported === true && state.webgpuMaster && state.webgpuOverrides[key] === true;
+/**
+ * Effective GPU flag for a subsystem (`master && per-subsystem`).
+ *
+ * `webgpuSupported` is `null` on most installs: the probe only ever persists
+ * `true`, and a failed re-probe removes the key. Treating `null` as "no" here
+ * would force every never-probed user onto WASM the moment this flag is
+ * actually wired into the ORT loads (LMT-028), so the unknown state is
+ * delegated to the caller through `assumeSupported` — a context that can see
+ * `navigator.gpu` passes `true` to keep the previous behaviour.
+ */
+export function isGpuEnabledFor(
+  state: GpuState,
+  key: keyof GpuState["webgpuOverrides"],
+  options?: { assumeSupported?: boolean },
+): boolean {
+  if (!state.webgpuMaster || state.webgpuOverrides[key] !== true) return false;
+  if (state.webgpuSupported === true) return true;
+  if (state.webgpuSupported === false) return false;
+  return options?.assumeSupported === true;
 }
 
 /**

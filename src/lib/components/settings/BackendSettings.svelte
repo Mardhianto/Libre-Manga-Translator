@@ -5,6 +5,7 @@
     visibleLlmModels,
   } from "@/lib/configs";
   import { openSetupTab, probeLlmsCached } from "@/lib/utils";
+  import { checkWebGPUFeature } from "@/lib/hardware";
   import {
     getManagedDownloads,
     onManagedDownloadProgress,
@@ -53,6 +54,8 @@
   let progress: Record<string, number> = $state({});
   let dlById: Record<string, RowDownloadState> = $state({});
   let unsubProgress: (() => void) | null = null;
+  /** null = unknown → offer every model; false → drop shader-f16-only rows. */
+  let hasShaderF16 = $state<boolean | null>(null);
   let serverTestResult = $state<{
     success: boolean;
     models?: string[];
@@ -144,6 +147,11 @@
     refreshLlmCacheStatus();
     refreshManaged();
     unsubProgress = onManagedDownloadProgress(applySnapshot);
+    // shader-f16 rows would fail inside WebLLM's reload() after the download,
+    // so hide the claim up front when the adapter can answer definitively.
+    void checkWebGPUFeature("shader-f16").then((ok) => {
+      hasShaderF16 = ok;
+    });
   });
 
   onDestroy(() => {
@@ -202,7 +210,25 @@
           id="llm-model"
           label="Local LLM Model"
           bind:value={llmModel}
-          options={visibleLlmModels().map((m) => ({ id: m.id, label: m.label, size: m.vram, desc: m.desc }))}
+          options={visibleLlmModels()
+            .filter(
+              (m) =>
+                // Keep the current pick visible so the dropdown never shows
+                // "Select model" for a saved value the user cannot see.
+                m.id === llmModel ||
+                !(hasShaderF16 === false && m.requiresFeature === "shader-f16"),
+            )
+            .map((m) => {
+              const lacksF16 = hasShaderF16 === false && m.requiresFeature === "shader-f16";
+              return {
+                id: m.id,
+                label: m.label,
+                size: m.weightMb >= 1024 ? `~${(m.weightMb / 1024).toFixed(1)} GB` : `~${m.weightMb} MB`,
+                desc: lacksF16
+                  ? `${m.desc} — your GPU lacks the shader-f16 extension, pick another model`
+                  : m.desc,
+              };
+            })}
           cached={Object.fromEntries(cachedLlms.map((id) => [id, true]))}
           {loadingId}
           {progress}

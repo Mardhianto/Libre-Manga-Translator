@@ -35,6 +35,45 @@ const ocrLangGroupMap: Record<string, string> = {
   // All other Latin-based languages will default to "latin" if not explicitly mapped
 };
 
+/** WebGPU feature a local LLM may require before `reload()` will succeed. */
+export type LlmRequiredFeature = "shader-f16";
+
+/** Which runtime serves a local model: WebLLM/MLC chunks, or wllama GGUF. */
+export type LlmEngine = "webllm" | "wllama";
+
+/**
+ * One selectable local LLM.
+ *
+ * `vram` is the *runtime* label shown next to the name; `weightMb` is the
+ * measured download footprint, so the two numbers stop being the same string
+ * (LMT-013). `engine`/`browsers` describe the build that offers the row:
+ * WebLLM models are Chrome-only, wllama GGUF models are Firefox-only, because
+ * `@mlc-ai/web-llm` cannot fit the 2 MB-per-.js AMO limit and Firefox has no
+ * WebGPU compute path for it.
+ */
+export interface LlmModelDef {
+  id: string;
+  label: string;
+  desc: string;
+  vram: string;
+  /** Sum of the model repo's weight shards, in MiB. */
+  weightMb: number;
+  /** Adapter feature WebLLM checks before loading (see `ShaderF16SupportError`). */
+  requiresFeature?: LlmRequiredFeature;
+  /** Defaults to "webllm" so merged/pre-existing rows stay WebLLM. */
+  engine?: LlmEngine;
+  /** Build targets this model is offered on ("chrome" covers non-Firefox). */
+  browsers?: string[];
+  /** wllama-only: HF repo + file served through the shared model cache. */
+  repo?: string;
+  file?: string;
+  /** wllama-only: exact GGUF size, used by the storage manager. */
+  bytes?: number;
+}
+
+/** @deprecated kept for imports written against the Chrome branch; use `LlmModelDef`. */
+export type LlmModelOption = LlmModelDef;
+
 export const DefaultConfig = {
   currentMode: "webgpu",
   sourceLang: "Auto-Detect",
@@ -82,6 +121,29 @@ export const DefaultConfig = {
   },
   serverMaxRetries: 1,
   serverRetryDelayMs: 2000,
+
+  // Per-job execution budgets (ms) for work forwarded to the offscreen
+  // document (LMT-010 / LMT-027). The offscreen document owns the clock and
+  // aborts the request at the deadline, so a slow page is actually cancelled
+  // instead of merely abandoned; the background service worker only mounts a
+  // last-resort guard `timeoutGuardGraceMs` later. Resolution lives in
+  // `timeouts.ts` so the numbers stay unit-testable.
+  timeoutShortJobMs: 90_000,
+  timeoutLocalTranslateMs: 480_000,
+  timeoutApiTranslateMs: 180_000,
+  /**
+   * Budget added per text region for API translation. A dense page spends one
+   * inference round-trip on the answer plus one on the correction, so a flat
+   * page budget cut off pages that were still generating.
+   */
+  timeoutApiTranslatePerBoxMs: 15_000,
+  timeoutGeminiTranslateMs: 180_000,
+  timeoutInpaintMs: 180_000,
+  /** LaMa runs on wasm CPU (~30s+ per 512px tile) - budget per region. */
+  timeoutQualityInpaintMs: 300_000,
+  timeoutQualityInpaintPerBoxMs: 60_000,
+  /** Extra time the background waits past the offscreen deadline. */
+  timeoutGuardGraceMs: 5_000,
 
   detectionMinConfidence: 0.5,
   skipBboxRefining: false,
@@ -148,6 +210,9 @@ export const DefaultConfig = {
       label: "Llama-3.2-1B",
       desc: "Small — fastest, lightweight dialogue translation.",
       vram: "~880 MB",
+      weightMb: 672,
+      engine: "webllm",
+      browsers: ["chrome"],
     },
     // Retained for future re-enablement if upstream WebLLM fixes Gemma 3 sliding-window attention correctness:
     // {
@@ -161,12 +226,35 @@ export const DefaultConfig = {
       label: "Qwen3.5-0.8B",
       desc: "Ultra-compact — low memory, quick responses.",
       vram: "~1.6 GB",
+      weightMb: 426,
+      engine: "webllm",
+      browsers: ["chrome"],
+    },
+    {
+      id: "gemma-2-2b-jpn-it-q4f16_1-MLC",
+      label: "Gemma2-2B-JPN",
+      desc: "Japanese-tuned — best small model for JP source pages.",
+      vram: "~1.9 GB",
+      weightMb: 1424,
+      requiresFeature: "shader-f16",
+      engine: "webllm",
+      browsers: ["chrome"],
     },
     {
       id: "Qwen3.5-2B-q4f16_1-MLC",
       label: "Qwen3.5-2B",
       desc: "Balanced — speed and quality for most manga.",
       vram: "~2.3 GB",
+      weightMb: 1032,
+      engine: "webllm",
+      browsers: ["chrome"],
+    },
+    {
+      id: "Hermes-3-Llama-3.2-3B-q4f16_1-MLC",
+      label: "Hermes-3-3B",
+      desc: "Balanced — steadiest structured output at 3B.",
+      vram: "~2.3 GB",
+      weightMb: 1733,
       engine: "webllm",
       browsers: ["chrome"],
     },
@@ -175,14 +263,37 @@ export const DefaultConfig = {
       label: "Qwen3.5-4B",
       desc: "Good — better reasoning for more complex manga.",
       vram: "~3.9 GB",
+      weightMb: 2280,
       engine: "webllm",
       browsers: ["chrome"],
     },
+    {
+      id: "Phi-4-mini-instruct-q4f16_1-MLC",
+      label: "Phi-4-mini",
+      desc: "Balanced — strong instruction following, larger download.",
+      vram: "~3.4 GB",
+      weightMb: 2079,
+      engine: "webllm",
+      browsers: ["chrome"],
+    },
+    {
+      id: "Qwen3.5-9B-q4f16_1-MLC",
+      label: "Qwen3.5-9B",
+      desc: "Best quality — needs a GPU with 8 GB+ VRAM.",
+      vram: "~6.4 GB",
+      weightMb: 4827,
+      engine: "webllm",
+      browsers: ["chrome"],
+    },
+    // ── Firefox-only (wllama / GGUF) ──────────────────────────────────────
+    // Kept in the same list so storage ids, cache names and the storage
+    // manager stay engine-agnostic; `visibleLlmModels()` hides them on Chrome.
     {
       id: "Qwen3.5-4B-Q3_K_M-GGUF",
       label: "Qwen3.5-4B",
       desc: "Balanced — speed and quality for most manga.",
       vram: "~2.1 GB",
+      weightMb: 2187,
       engine: "wllama",
       browsers: ["firefox"],
       repo: env.ggufModelRepo,
@@ -194,6 +305,7 @@ export const DefaultConfig = {
       label: "Tiny Aya Global",
       desc: "Tiny multilingual model — focused on translating text.",
       vram: "~2.0 GB",
+      weightMb: 2045,
       engine: "wllama",
       browsers: ["firefox"],
       repo: "CohereLabs/tiny-aya-global-GGUF",
@@ -205,13 +317,14 @@ export const DefaultConfig = {
       label: "Tiny Aya Fire",
       desc: "Tiny Fire model — focused on translating CJK / Asian language.",
       vram: "~2.0 GB",
+      weightMb: 2045,
       engine: "wllama",
       browsers: ["firefox"],
       repo: "CohereLabs/tiny-aya-fire-GGUF",
       file: "tiny-aya-fire-q4_k_m.gguf",
       bytes: 2143977056,
     },
-  ],
+  ] satisfies LlmModelDef[],
   // Per-model ChatConfig overrides merged onto each model's downloaded
   // mlc-chat-config.json (via ModelRecord.overrides).
   //
@@ -294,14 +407,20 @@ export interface ResolvedLangGroup {
 
 /**
  * Single source of truth for source-language → rec-model group resolution.
- * - "Latin" (capitalised UI label) and "Auto-Detect" resolve to "latin".
+ * - "Latin" (capitalised UI label) resolves to "latin" and is not a fallback.
+ * - "Auto-Detect" resolves to "latin" **as a placeholder**: the gate has not
+ *   spoken yet, so latin is an assumption, not an answer. `fellBack: true`
+ *   lets callers log/notice it instead of claiming the page was identified
  * - Direct `ocrLangGroupMap` hits resolve silently.
  * - Anything else falls back to "latin" with `fellBack: true` so callers can
  *   surface which `rec.onnx` was actually used.
  */
 export function resolveLangGroup(sourceLang: string): ResolvedLangGroup {
-  if (sourceLang === "Latin" || sourceLang === "Auto-Detect") {
+  if (sourceLang === "Latin") {
     return { group: "latin", fellBack: false };
+  }
+  if (sourceLang === "Auto-Detect") {
+    return { group: "latin", fellBack: true };
   }
   const mapped = ocrLangGroupMap[sourceLang];
   if (mapped && (SUPPORTED_LANG_GROUPS as readonly string[]).includes(mapped)) {
@@ -325,22 +444,6 @@ export function normalizeDetectionModel(id: string | null | undefined): string {
   return id || DefaultConfig.detectionModels[0].id;
 }
 
-export type LlmEngine = "webllm" | "wllama";
-
-export interface LlmModelDef {
-  id: string;
-  label: string;
-  desc: string;
-  vram: string;
-  engine: LlmEngine;
-  /** build targets this model is offered on ("chrome" covers all non-Firefox builds) */
-  browsers: string[];
-  /** wllama-only: HF repo + file served through the shared model cache */
-  repo?: string;
-  file?: string;
-  bytes?: number;
-}
-
 /** "firefox" for Firefox builds, "chrome" for everything else. */
 export function currentBrowser(): "firefox" | "chrome" {
   try {
@@ -359,18 +462,25 @@ export function currentBrowser(): "firefox" | "chrome" {
   return "chrome";
 }
 
-/** LLM models offered in this build (Firefox-only swap: GGUF on Firefox, MLC elsewhere). */
+/**
+ * LLM models offered in this build: WebLLM/MLC on Chrome, wllama GGUF on
+ * Firefox. FireFox rows are hidden rather than removed so a single
+ * `DefaultConfig.llmModels` list still resolves storage ids and cache names on
+ * both targets.
+ */
 export function visibleLlmModels(): LlmModelDef[] {
   const browser = currentBrowser();
-  const list = (DefaultConfig.llmModels as LlmModelDef[]).filter((m) =>
-    (m.browsers ?? ["chrome"]).includes(browser),
+  const engine: LlmEngine = browser === "firefox" ? "wllama" : "webllm";
+  return (DefaultConfig.llmModels as LlmModelDef[]).filter((m) =>
+    (m.browsers ?? [m.engine === "wllama" ? "firefox" : "chrome"]).includes(
+      browser,
+    ) && (m.engine ?? "webllm") === engine,
   );
-  return list.length > 0 ? list : (DefaultConfig.llmModels as LlmModelDef[]);
 }
 
 /** Resolve a stored model id, falling back to this build's default (handles cross-engine stale ids). */
 export function llmModelDef(id?: string | null): LlmModelDef {
-  const list = visibleLlmModels();
+  const list = requireLlmModels();
   if (id === "Qwen3.5-4B-IQ4_XS-GGUF") {
     const upgraded = list.find((m) => m.id === "Qwen3.5-4B-Q3_K_M-GGUF");
     if (upgraded) return upgraded;
@@ -379,7 +489,17 @@ export function llmModelDef(id?: string | null): LlmModelDef {
 }
 
 export function defaultLlmModelId(): string {
-  return visibleLlmModels()[0].id;
+  return llmModelDef(null).id;
+}
+
+/**
+ * The model list this build must be able to resolve. Guarantees a non-empty
+ * array: `visibleLlmModels()` can only be empty if a caller passed a build with
+ * no matching engine rows, which would otherwise crash on `[0]`.
+ */
+export function requireLlmModels(): LlmModelDef[] {
+  const list = visibleLlmModels();
+  return list.length > 0 ? list : (DefaultConfig.llmModels as LlmModelDef[]);
 }
 
 /**

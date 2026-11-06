@@ -9,6 +9,7 @@ import {
 import { createRunLock, downloadArtifactHF, yieldToMain } from "../utils";
 import { DefaultConfig } from "../configs";
 import { env } from "../env";
+import { gpuEnabledFor } from "../gpu-runtime";
 import type { OcrEngine, SingleOcrResult } from "./types";
 import type { GateReason } from "../gate";
 
@@ -189,8 +190,10 @@ export class PororoOcrEngine implements OcrEngine {
     if (this.session && this.vocab) return;
 
     const repo = env.pororoModelRepo;
+    // Recognition stage shares the `ocr` toggle (LMT-028).
+    const gpu = gpuEnabledFor("ocr");
     const [recModel, optResp] = await Promise.all([
-      downloadArtifactHF(repo, "brainocr.onnx"),
+      downloadArtifactHF(repo, "brainocr.onnx", false, { gpu }),
       downloadArtifactHF(repo, "ocr-opt.txt"),
     ]);
 

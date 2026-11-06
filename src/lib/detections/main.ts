@@ -1,6 +1,7 @@
 import * as ort from "onnxruntime-web/all";
 import { createRunLock, downloadArtifactFromUrl, downloadArtifactHF, yieldToMain } from "../utils";
 import { DefaultConfig, normalizeDetectionModel } from "../configs";
+import { gpuEnabledFor } from "../gpu-runtime";
 import { runRtDetrDetection } from "./rtdetr";
 import { runComicTextDetection } from "./comictext";
 import { clearSegmentation } from "./segmentation";
@@ -17,10 +18,15 @@ export const UNKNOWN_DETECTION_MODEL_MESSAGE = (model: string) =>
 async function loadDetectionSession(
   model: string,
 ): Promise<ort.InferenceSession> {
+  // Detection has its own GPU toggle (LMT-028): turning recognition off must
+  // not silently force the detector to CPU.
+  const gpu = gpuEnabledFor("detection");
   if (model === "comic-bubble") {
     return (await downloadArtifactHF(
       DefaultConfig.rtdetrModelRepo,
       "detector-v4-s_int8.onnx",
+      false,
+      { gpu },
     )) as ort.InferenceSession;
   }
 
@@ -28,6 +34,7 @@ async function loadDetectionSession(
     return await downloadArtifactFromUrl(
       DefaultConfig.comicTextDetectorUrl,
       "comic-text-detector",
+      { gpu },
     );
   }
 

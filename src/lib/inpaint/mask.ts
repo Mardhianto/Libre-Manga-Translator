@@ -1,5 +1,6 @@
 import {
   INK_PAPER_FACTOR,
+  INK_SIDE_MIN_GAP,
   MAX_COMPONENT_FRACTION,
   MIN_COMPONENT_PX,
 } from "./constants";
@@ -42,6 +43,40 @@ function histogram(luma: Float32Array): Int32Array {
   return hist;
 }
 
+export interface InkStats {
+  /** p75 of the crop perimeter - the tone the text is written on. */
+  paper: number;
+  /** p1 of the crop - the darkest ink present. */
+  darkInk: number;
+  /** p99 of the crop - the lightest ink present. */
+  lightInk: number;
+}
+
+/**
+ * Paper tone and the two ink extremes of a crop.
+ *
+ * Ink is a small area of the CROP (bbox + 2x growth margin), so a p5-style
+ * quantile lands in paper; take the extreme 1% instead.
+ */
+export function inkStats(luma: Float32Array, w: number, h: number): InkStats {
+  const hist = histogram(luma);
+  // Perimeter histogram = paper. 1 px border.
+  const border = new Int32Array(256);
+  for (let x = 0; x < w; x++) {
+    border[luma[x] | 0]++;
+    border[luma[(h - 1) * w + x] | 0]++;
+  }
+  for (let y = 0; y < h; y++) {
+    border[luma[y * w] | 0]++;
+    border[luma[y * w + w - 1] | 0]++;
+  }
+  return {
+    paper: percentile(border, 0.75),
+    darkInk: percentile(hist, 0.01),
+    lightInk: percentile(hist, 0.99),
+  };
+}
+
 /**
  * Text-shaped seed mask inside a crop.
  *
@@ -65,29 +100,14 @@ export function buildInkSeed(
   const data = new Uint8Array(w * h);
   if (w < 3 || h < 3) return { data, w, h, ox, oy };
 
-  const hist = histogram(luma);
-  // Perimeter histogram = paper. 1 px border.
-  const border = new Int32Array(256);
-  for (let x = 0; x < w; x++) {
-    border[luma[x] | 0]++;
-    border[luma[(h - 1) * w + x] | 0]++;
-  }
-  for (let y = 0; y < h; y++) {
-    border[luma[y * w] | 0]++;
-    border[luma[y * w + w - 1] | 0]++;
-  }
-
-  const paper = percentile(border, 0.75);
-  // Ink is a small area of the CROP (bbox + 2x growth margin), so a p5-style
-  // quantile lands in paper; take the extreme 1% instead.
-  const darkInk = percentile(hist, 0.01);
-  const lightInk = percentile(hist, 0.99);
+  const { paper, darkInk, lightInk } = inkStats(luma, w, h);
   const inverted = paper < 128;
   const ink = inverted ? lightInk : darkInk;
 
   const lo = Math.min(ink, paper);
   const hi = Math.max(ink, paper);
-  if (hi - lo < 12) return { data, w, h, ox, oy }; // no usable contrast
+  // No usable contrast (the same gap the two-sided seed requires per side).
+  if (hi - lo < INK_SIDE_MIN_GAP) return { data, w, h, ox, oy };
 
   const thr = inverted
     ? lo + (hi - lo) * (1 - INK_PAPER_FACTOR)
@@ -113,6 +133,75 @@ export function buildInkSeed(
       }
     }
   }
+  dropSmallComponents(data, w, h, MIN_COMPONENT_PX);
+  dropHugeComponents(data, w, h, MAX_COMPONENT_FRACTION);
+  return { data, w, h, ox, oy };
+}
+
+/**
+ * Two-sided ink seed for outlined lettering: dark side AND light side.
+ *
+ * `buildInkSeed` decides ONE polarity from the crop perimeter and keeps only
+ * that extreme. Outlined lettering (dark outline around a light core - the
+ * standard manga balloon treatment, also common in coloured fan scans) then
+ * seeds the outline and misses every core pixel, because the core sits on the
+ * FAR side of the paper tone. The seed is left as a hollow ring: the far side
+ * of the ring, not the text.
+ *
+ * That hollow seed is harmless on its own - `fitMask` usually rejects it and
+ * the region still gets cleaned. It is only catastrophic once a fit fails and
+ * the seed is handed to a pixel engine: Telea's search radius then sees the
+ * surviving cores as KNOWN pixels and pulls their light tone across the hole,
+ * which is exactly the white smearing this function exists to prevent.
+ *
+ * Both sides are gated on real contrast against the crop's own paper tone, so
+ * a normal dark-on-light page gets the same mask `buildInkSeed` produced (the
+ * light side is on the paper side of the threshold, so nothing is added).
+ */
+export function buildTwoSidedSeed(
+  luma: Float32Array,
+  w: number,
+  h: number,
+  ox: number,
+  oy: number,
+  rect: { x1: number; y1: number; x2: number; y2: number },
+): Mask {
+  const data = new Uint8Array(w * h);
+  if (w < 3 || h < 3) return { data, w, h, ox, oy };
+
+  const { paper, darkInk, lightInk } = inkStats(luma, w, h);
+
+  const x1 = Math.max(0, rect.x1);
+  const y1 = Math.max(0, rect.y1);
+  const x2 = Math.min(w - 1, rect.x2);
+  const y2 = Math.min(h - 1, rect.y2);
+  if (x2 < x1 || y2 < y1) return { data, w, h, ox, oy };
+
+  const darkGap = paper - darkInk;
+  const lightGap = lightInk - paper;
+  if (darkGap < INK_SIDE_MIN_GAP && lightGap < INK_SIDE_MIN_GAP) {
+    return { data, w, h, ox, oy };
+  }
+
+  // Thresholds are the same 40% blend `buildInkSeed` uses, but each one is
+  // only armed when its side of the histogram actually clears the paper tone.
+  const darkThr =
+    darkGap >= INK_SIDE_MIN_GAP
+      ? darkInk + darkGap * INK_PAPER_FACTOR
+      : -Infinity;
+  const lightThr =
+    lightGap >= INK_SIDE_MIN_GAP
+      ? paper + lightGap * (1 - INK_PAPER_FACTOR)
+      : Infinity;
+
+  for (let y = y1; y <= y2; y++) {
+    for (let x = x1; x <= x2; x++) {
+      const i = y * w + x;
+      const v = luma[i];
+      if (v <= darkThr || v >= lightThr) data[i] = 1;
+    }
+  }
+
   dropSmallComponents(data, w, h, MIN_COMPONENT_PX);
   dropHugeComponents(data, w, h, MAX_COMPONENT_FRACTION);
   return { data, w, h, ox, oy };

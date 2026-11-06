@@ -1,7 +1,17 @@
 import type { Wllama } from "@wllama/wllama";
 import { DefaultConfig, type LlmModelDef } from "./configs";
 import { buildSiteRulePrompts, buildTranslationPrompts } from "./prompts";
-import { parseLlmJson, validateTranslationResult } from "./server/validator";
+import {
+  attachDiagnostics,
+  clipRawResponse,
+  isTranslationValidationError,
+  mergeRunInfo,
+  parseLlmJson,
+  promptChars,
+  validateTranslationResult,
+  type LlmRunInfo,
+  type ValidatedTranslation,
+} from "./server/validator";
 import { fetchAndCacheWithProgress } from "./utils";
 // Bundled at build time (8.4MB .wasm asset, not .js — outside the AMO
 // 2MB-per-.js rule). Never the CDN variant (remote code is rejected).
@@ -238,8 +248,10 @@ async function runWllamaModel(
   schema: string,
   def: LlmModelDef,
   temperature = DefaultConfig.llmTemperature,
+  signal?: AbortSignal,
 ) {
-  const instance = await ensureWllama(def);
+  if (signal?.aborted) throw abortError(signal);
+  const instance = await ensureWllama(def, undefined, undefined, signal);
   const messages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },
@@ -263,6 +275,7 @@ async function runWllamaModel(
     ];
   let resultText = "";
   let llmPerf: LlmPerf | undefined;
+  let llmFinishReason: string | undefined;
   let lastErr: unknown = null;
   for (const mode of attempts) {
     try {
@@ -272,6 +285,7 @@ async function runWllamaModel(
         temperature,
         max_tokens: 1024,
         timings_per_token: true,
+        ...(signal ? { abortSignal: signal } : {}),
         ...(chat_template_kwargs ? { chat_template_kwargs } : {}),
         ...(mode === null
           ? {}
@@ -289,9 +303,13 @@ async function runWllamaModel(
       });
       llmPerf = extractWllamaPerf(reply, performance.now() - t0);
       resultText = reply.choices[0].message.content as string;
+      llmFinishReason = reply.choices[0].finish_reason ?? undefined;
       break;
     } catch (err) {
       lastErr = err;
+      // A deadline abort is not a dead worker: keep the engine loaded so the
+      // next page does not pay a multi-minute GGUF reload (LMT-010).
+      if (signal?.aborted) throw abortError(signal);
       const msg = (err as Error)?.message ?? String(err);
       if (/crash|abort/i.test(msg)) {
         // Worker aborted or crashed — instance dead. Reset singleton to prevent poisoning future attempts.
@@ -308,12 +326,27 @@ async function runWllamaModel(
     throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
   }
 
+  const info: LlmRunInfo = {
+    rawResponse: clipRawResponse(resultText),
+    finishReason: llmFinishReason,
+    promptChars: promptChars(systemPrompt, userPrompt),
+  };
   try {
-    return { parsed: parseLlmJson(resultText), llmPerf };
+    return { data: parseLlmJson(resultText), info, llmPerf };
   } catch (error) {
     console.error("Failed to parse LLM output:", resultText);
-    throw new Error(`Local LLM generated invalid JSON: ${(error as Error).message}`);
+    throw attachDiagnostics(
+      new Error(`Local LLM generated invalid JSON: ${(error as Error).message}`),
+      info,
+    );
   }
+}
+
+/** Reuse the caller's abort reason so the user sees "Timed out after Ns: …". */
+function abortError(signal?: AbortSignal): Error {
+  const reason: unknown = signal?.reason;
+  if (reason instanceof Error) return reason;
+  return new DOMException("Translation job cancelled", "AbortError");
 }
 
 /**
@@ -361,7 +394,12 @@ export async function translateWithWllama(
   seriesContext?: SeriesContext,
   model?: string,
   temperature = DefaultConfig.llmTemperature,
+  /** Auto-Detect only: the script the OCR gate identified (LMT-030). */
+  detectedLabel?: string | null,
+  /** Cancels generation at the job deadline (LMT-010). */
+  signal?: AbortSignal,
 ): Promise<TranslateResult> {
+  if (signal?.aborted) throw abortError(signal);
   if (!ocrResults || ocrResults.length === 0) {
     return { translations: [] };
   }
@@ -374,18 +412,65 @@ export async function translateWithWllama(
     targetLang,
     sourceLang,
     seriesContext,
+    detectedLabel,
   );
 
-  const { parsed, llmPerf } = await runWllamaModel(
-    systemPrompt,
-    userPrompt,
-    JSON.stringify(schema),
-    def,
-    temperature,
-  );
-  const validated = validateTranslationResult(parsed, ocrResults.length);
-  if (llmPerf) (validated as TranslateResult).llmPerf = llmPerf;
-  return validated as TranslateResult;
+  const calls: LlmRunInfo[] = [];
+  let first: Awaited<ReturnType<typeof runWllamaModel>>;
+  try {
+    first = await runWllamaModel(
+      systemPrompt,
+      userPrompt,
+      JSON.stringify(schema),
+      def,
+      temperature,
+      signal,
+    );
+  } catch (error) {
+    throw attachDiagnostics(error, mergeRunInfo(calls));
+  }
+  calls.push(first.info);
+  // Token stats are additive debug data; absent when the runtime omits timings.
+  const withPerf = (result: ValidatedTranslation): TranslateResult =>
+    first.llmPerf ? { ...result, llmPerf: first.llmPerf } : result;
+
+  try {
+    return withPerf(
+      validateTranslationResult(first.data, ocrResults.length, {
+        sourceTexts: ocrResults,
+        sourceLang,
+        targetLang,
+        run: mergeRunInfo(calls),
+      }),
+    );
+  } catch (error) {
+    if (!isTranslationValidationError(error)) throw error;
+
+    console.warn(
+      `[wllama] validation failed (${error.code}): ${error.message} — requesting correction`,
+    );
+    try {
+      const corrected = await runWllamaModel(
+        systemPrompt,
+        `${userPrompt}\n\nCORRECTION: ${error.message}\nReturn the full corrected JSON now.`,
+        JSON.stringify(schema),
+        def,
+        temperature,
+        signal,
+      );
+      calls.push(corrected.info);
+      return withPerf(
+        validateTranslationResult(corrected.data, ocrResults.length, {
+          sourceTexts: ocrResults,
+          sourceLang,
+          targetLang,
+          run: mergeRunInfo(calls),
+        }),
+      );
+    } catch (retryError) {
+      throw attachDiagnostics(retryError, mergeRunInfo(calls));
+    }
+  }
 }
 
 export async function makeSiteRuleWithWllama(
@@ -393,7 +478,9 @@ export async function makeSiteRuleWithWllama(
   path: string,
   model?: string,
   temperature = DefaultConfig.llmTemperature,
+  signal?: AbortSignal,
 ): Promise<AIGeneratedRule> {
+  if (signal?.aborted) throw abortError(signal);
   const def = (DefaultConfig.llmModels as LlmModelDef[]).find(
     (m) => m.id === model,
   ) ?? (DefaultConfig.llmModels as LlmModelDef[])[0];
@@ -402,12 +489,13 @@ export async function makeSiteRuleWithWllama(
     path,
   );
 
-  const { parsed } = await runWllamaModel(
+  const { data } = await runWllamaModel(
     systemPrompt,
     userPrompt,
     JSON.stringify(schema),
     def,
     temperature,
+    signal,
   );
-  return parsed as AIGeneratedRule;
+  return data as AIGeneratedRule;
 }

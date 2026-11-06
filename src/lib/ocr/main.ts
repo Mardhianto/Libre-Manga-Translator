@@ -8,6 +8,7 @@ import {
 import { fetchAsImageBitmap } from "../utils";
 import { DefaultConfig, resolveLangGroup } from "../configs";
 import {
+  bestLabel,
   groupForLabel,
   majorityLabel,
   decideSkip,
@@ -119,20 +120,37 @@ export async function textRecognise(
 
     let pageLabel: string | null = null;
     let langGroup: string;
+    let groupSource: GateSummary["groupSource"] = "explicit";
     if (mode === "auto" && gateLoaded) {
-      pageLabel = majorityLabel(
-        verdicts.filter((v): v is RegionVerdict => v !== null),
-      );
+      const cast = verdicts.filter((v): v is RegionVerdict => v !== null);
+      pageLabel = majorityLabel(cast);
+      if (!pageLabel) {
+        // LMT-030: no majority is not the same as no evidence. The strongest
+        // label still names a script; refusing it here used to fall through to
+        // `latin` and read a Japanese page with the Latin rec pack silently.
+        pageLabel = bestLabel(cast);
+        if (pageLabel) {
+          console.info(
+            `[ocr] auto-detect: no page majority; using best label "${pageLabel}" (${groupForLabel(pageLabel) ?? "unmapped"})`,
+          );
+        }
+      }
     }
     const gateGroup = mode === "auto" && gateLoaded ? groupForLabel(pageLabel) : null;
     if (gateGroup) {
       langGroup = gateGroup;
+      groupSource = "gate";
     } else {
       const resolved = resolveLangGroup(sourceLang);
       langGroup = resolved.group;
+      // Resolved by the user's pick, or an assumption? Only the assumption
+      // earns a warning/log entry — a chosen "Latin" is not a fallback.
+      groupSource = resolved.fellBack ? "fallback" : "explicit";
       if (resolved.fellBack) {
         console.warn(
-          `[ocr] "${sourceLang}" has no dedicated rec model — using languages/${langGroup}/rec.onnx`,
+          sourceLang === "Auto-Detect"
+            ? `[ocr] auto-detect found no script evidence — assuming languages/${langGroup}/rec.onnx`
+            : `[ocr] "${sourceLang}" has no dedicated rec model — using languages/${langGroup}/rec.onnx`,
         );
       }
     }
@@ -196,6 +214,10 @@ export async function textRecognise(
       skipped,
       group: langGroup,
       unavailable: mode !== "off" && !gateLoaded,
+      // Only meaningful under Auto-Detect: an explicit source is the user's
+      // answer, not a detection result.
+      label: mode === "auto" ? pageLabel ?? "" : undefined,
+      groupSource,
     };
 
     return { results: result, gate };

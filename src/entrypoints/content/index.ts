@@ -4,7 +4,7 @@ import FloatingTrigger from "@/lib/components/FloatingTrigger.svelte";
 import { AutoTranslateOrchestrator } from "./auto-translate";
 import * as Registry from "./translation-registry";
 import { mount, unmount } from "svelte";
-import { ShadowRootContentScriptUi } from "#imports";
+import { ShadowRootContentScriptUi, storage } from "#imports";
 import { getSiteRule, resolveActiveSiteRule } from "@/lib/adapters";
 import { DefaultConfig, llmModelDef, normalizeDetectionModel, resolveLangGroup } from "@/lib/configs";
 import { logDebugEntry, updateDebugEntry } from "./debug";
@@ -12,7 +12,6 @@ import {
   createImageObservers,
   imageToBase64,
   repaintWithTranslations,
-  updateSeriesContext,
   inpaintImage,
   drawTranslations,
   exportCanvasToJpeg,
@@ -24,10 +23,37 @@ import {
 } from "./utils";
 import { getElementSrc } from "@/lib/canvas";
 import { maskUntranslated } from "@/lib/server/validator";
+import {
+  isCleanResult,
+  seriesContextFromStored,
+} from "@/lib/series-context";
+import {
+  localHistoryKey,
+  syncContextKey,
+  updateSeriesContext,
+} from "@/lib/series-context-store";
 import "@/assets/app.css";
 
 const srcKey = (src: string) =>
   src.startsWith("data:") ? quickHash(src) : src;
+
+/**
+ * Copy the run-level diagnostic facts onto a `DebugEntry` (LMT-032).
+ *
+ * The validator already clips `rawResponse`; passing `undefined` for every
+ * absent field keeps the stored entry honest instead of writing zeros that
+ * look like measurements.
+ */
+function runDiagnosticFields(d?: TranslationDiagnostics) {
+  return {
+    rawResponse: d?.rawResponse,
+    llmCalls: d?.llmCalls,
+    finishReason: d?.finishReason,
+    promptChars: d?.promptChars,
+    padded: d?.padded,
+    truncated: d?.truncated,
+  };
+}
 
 // Wait until the image has a real layout (loaded + non-zero rendered box).
 // Measuring a hidden/not-yet-loaded image freezes the wrapper at 0×0 and
@@ -392,7 +418,8 @@ export default defineContentScript({
                   // and serialize behind popup reads. Reading them in bulk
                   // removes 13 sequential async hops from the hot path.
                   const cfgItems = await storage.getItems([
-                    `sync:context-${seriesName}`,
+                    syncContextKey(seriesName),
+                    localHistoryKey(seriesName),
                     "sync:current-mode",
                     "sync:source-lang",
                     "sync:target-lang",
@@ -410,22 +437,19 @@ export default defineContentScript({
                     cfgItems.map((i) => [i.key, i.value]),
                   );
 
-                  let seriesContext = cfg[`sync:context-${seriesName}`] as
-                    | SeriesContext
-                    | undefined;
+                  const seriesContext = seriesContextFromStored(
+                    cfg[syncContextKey(seriesName)],
+                    cfg[localHistoryKey(seriesName)],
+                    seriesName,
+                  );
 
-                  // Perform the continuity check
-                  if (seriesContext) {
-                    const isContinuous =
-                      seriesContext.lastChapterId === chapterId &&
-                      seriesContext.lastPageIndex !== null &&
-                      resolvedPage === seriesContext.lastPageIndex + 1;
-
-                    // If they jumped chapters or skipped pages, wipe the history in memory
-                    if (!isContinuous) {
-                      seriesContext.recentHistory = [];
-                    }
-                  }
+                  // Continuity is computed here, outside the update path, so a
+                  // dirty page (which must not append history) still advances
+                  // the stored position instead of forcing a reset next time.
+                  const isContinuous =
+                    seriesContext.lastChapterId === chapterId &&
+                    seriesContext.lastPageIndex !== null &&
+                    resolvedPage === seriesContext.lastPageIndex + 1;
 
                   const curMode =
                     (cfg["sync:current-mode"] as string | undefined) ??
@@ -523,6 +547,7 @@ export default defineContentScript({
                         sourceLang: srcLang,
                         targetLang: tgtLang,
                         langGroup: debugCtx.langGroup,
+                        langGroupFallback: resolveLangGroup(srcLang).fellBack,
                         bboxCount: bboxes.length,
                         timing: { total: duration },
 
@@ -541,6 +566,11 @@ export default defineContentScript({
                           llm: curMode === "webgpu" ? debugCtx.llmModel : undefined,
                           server: curMode === "api" ? debugCtx.serverModel : undefined,
                         },
+                        // A failed page is where the raw answer matters most
+                        // (truncated JSON, wrong shape) — the backend stamps
+                        // these onto the error and the offscreen relay forwards
+                        // them (LMT-032).
+                        ...runDiagnosticFields(resp.diagnostics),
                         error: resp.error,
                       })
 
@@ -567,33 +597,45 @@ export default defineContentScript({
                   const backend = resp?.backend;
 
                   if (!opts?.transient) {
-
                     // Fire-and-forget: success debug log, page cache, and series
                     // context updates. None of these need to block the popup.
                     const successEntryPromise = logDebugEntry({
-                    id: crypto.randomUUID(),
-                    timestamp: Date.now(),
-                    success: true,
-                    mode: curMode,
-                    version: debugCtx.version,
-                    device: debugCtx.device,
-                    backend: curMode === "webgpu" ? backend : undefined,
-                    gate: gate
-                      ? {
-                          mode: gate.mode,
-                          checked: gate.checked,
-                          skipped: gate.skipped,
-                          group: gate.group,
-                          unavailable: gate.unavailable,
-                        }
-                      : undefined,
-                    sourceLang: srcLang,
-                    targetLang: tgtLang,
-                    langGroup: debugCtx.langGroup,
-                    bboxCount: bboxes.length,
-                    sourceTexts,
-                    translations,
-                    untranslated: diagnostics?.untranslated,
+                      id: crypto.randomUUID(),
+                      timestamp: Date.now(),
+                      success: true,
+                      mode: curMode,
+                      version: debugCtx.version,
+                      device: debugCtx.device,
+                      backend: curMode === "webgpu" ? backend : undefined,
+                      gate: gate
+                        ? {
+                            mode: gate.mode,
+                            checked: gate.checked,
+                            skipped: gate.skipped,
+                            group: gate.group,
+                            unavailable: gate.unavailable,
+                            label: gate.label,
+                            groupSource: gate.groupSource,
+                          }
+                        : undefined,
+                      sourceLang: srcLang,
+                      targetLang: tgtLang,
+                      // Prefer the gate's resolved pack: `debugCtx.langGroup` is
+                      // the pre-OCR `resolveLangGroup` guess, so under
+                      // Auto-Detect it says "latin" even when the gate picked
+                      // chinese (LMT-030).
+                      langGroup: gate?.group ?? debugCtx.langGroup,
+                      // Was `langGroup` a silent assumption rather than a
+                      // resolved pack? The gate's own source is authoritative;
+                      // otherwise fall back to what the config resolver says.
+                      langGroupFallback: gate?.groupSource
+                        ? gate.groupSource === "fallback"
+                        : resolveLangGroup(srcLang).fellBack,
+                      bboxCount: bboxes.length,
+                      sourceTexts,
+                      translations,
+                      untranslated: diagnostics?.untranslated,
+                      ...runDiagnosticFields(diagnostics),
                     timing,
                     ...(curMode === "webgpu" && llmPerf
                       ? {
@@ -612,7 +654,12 @@ export default defineContentScript({
                       curMode === "gemini" ? debugCtx.geminiModel : undefined,
                     models: {
                       detection: debugCtx.detectionModel,
-                      ocr: debugCtx.ocrModel,
+                      // The pack actually loaded: `debugCtx.ocrModel` is the
+                      // pre-OCR guess, which under Auto-Detect always says latin
+                      // (LMT-030).
+                      ocr: gate?.group
+                        ? DefaultConfig.ocrModelPath(gate.group)
+                        : debugCtx.ocrModel,
                       llm: curMode === "webgpu" ? debugCtx.llmModel : undefined,
                       server: curMode === "api" ? debugCtx.serverModel : undefined,
                     },
@@ -622,27 +669,39 @@ export default defineContentScript({
                     })
                     .catch((err) => console.warn("LMT: debug-log write failed:", err));
 
-                  const cacheKey = await translationKey();
-                  storage
-                    .setItem<PageCache>(`local:${cacheKey}`, {
-                      bboxes,
-                      // Persist the paintable set so a cache hit cannot
-                      // resurrect an echoed source line.
-                      translations: visibleTranslations,
-                      sourceTexts,
-                    })
-                    .catch((err) => console.warn("LMT: page-cache persist failed:", err));
+                  // only a fully translated page may write cache or
+                  // context. A padded/echoed page keeps its debug entry (that
+                  // is the whole point of the log) but must not poison the
+                  // next prompt or resurrect echoed lines from cache.
+                  if (isCleanResult(diagnostics)) {
+                    const cacheKey = await translationKey();
+                    storage
+                      .setItem<PageCache>(`local:${cacheKey}`, {
+                        bboxes,
+                        // Persist the paintable set so a cache hit cannot
+                        // resurrect an echoed source line.
+                        translations: visibleTranslations,
+                        sourceTexts,
+                      })
+                      .catch((err) => console.warn("LMT: page-cache persist failed:", err));
 
-                  updateSeriesContext(
-                    seriesContext ?? null,
-                    seriesName,
-                    chapterId,
-                    resolvedPage,
-                    // Never feed an echoed source line into the next prompt.
-                    visibleTranslations,
-                    context,
-                  ).catch((err) => console.warn("LMT: series-context update failed:", err));
-                }
+                    updateSeriesContext(
+                      seriesName,
+                      chapterId,
+                      resolvedPage,
+                      // Never feed an echoed source line into the next prompt.
+                      visibleTranslations,
+                      context,
+                      { resetHistory: !isContinuous, diagnostics },
+                    ).catch((err) => console.warn("LMT: series-context update failed:", err));
+                  } else {
+                    console.warn(
+                      `LMT: ${diagnostics?.untranslated?.length ?? 0} untranslated box(es) on ${
+                        seriesName ? `"${seriesName}" ` : ""
+                      }page ${resolvedPage}; cache/context not saved.`,
+                    );
+                  }
+                  }
 
                   return { translations: visibleTranslations, sourceTexts, context, gateSkip, gate, diagnostics };
                 },

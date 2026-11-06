@@ -135,48 +135,6 @@ export async function repaintWithTranslations(
   return drawTranslations(url, bboxes, translations);
 }
 
-export async function updateSeriesContext(
-  cleanContext: SeriesContext | null,
-  seriesName: string,
-  chapterId: string,
-  pageIndex: number,
-  translations: Translations,
-  context?: { summary?: string; dictionary?: string },
-) {
-  // If no context existed at all, build a fresh one
-  const stored = cleanContext ?? {
-    seriesName: seriesName,
-    summary: "",
-    dictionary: "",
-    lastChapterId: null,
-    lastPageIndex: null,
-    recentHistory: [],
-    translatedCount: 0,
-  };
-
-  // Update summary/dictionary if provided
-  if (context) {
-    stored.summary = context.summary ?? stored.summary;
-    stored.dictionary = context.dictionary ?? stored.dictionary;
-  }
-
-  stored.translatedCount += 1;
-  stored.lastChapterId = chapterId;
-  stored.lastPageIndex = pageIndex;
-
-  // Push the new history object into the buffer. Masked/echoed boxes are
-  // empty strings, so drop them instead of writing " | " noise.
-  const formattedText = translations.filter((t) => t.trim().length > 0).join(" | ");
-  stored.recentHistory = formattedText
-    ? [
-        ...stored.recentHistory.slice(-4),
-        { chapterId, pageIndex, text: formattedText },
-      ]
-    : stored.recentHistory;
-
-  await storage.setItem(`sync:context-${seriesName}`, stored);
-}
-
 /**
  * Resize the overlay wrapper to the live image's rendered box and notify
  * the Overlay (frozen mount-time geometry goes stale when readers re-layout

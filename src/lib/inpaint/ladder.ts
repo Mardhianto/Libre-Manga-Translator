@@ -257,8 +257,8 @@ function fastAttempts(
   );
   const teleaAttempt: Attempt = {
     method: "telea",
-    mask: fitted.mask,
-    render: () => runTelea(page, fitted.mask, cropRgb),
+    mask: fitted.teleaMask,
+    render: () => runTelea(page, fitted.teleaMask, cropRgb),
   };
   if (fitted.route === "fill") {
     return [
@@ -430,8 +430,8 @@ async function paintFastRegions(
     if (done === "declined" && options?.alwaysInpaint) {
       await runRung(
         page,
-        fitted.mask,
-        () => runTelea(page, fitted.mask, cropRgb),
+        fitted.teleaMask,
+        () => runTelea(page, fitted.teleaMask, cropRgb),
         () => false,
       );
       done = "telea";
