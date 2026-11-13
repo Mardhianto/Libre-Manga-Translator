@@ -1,5 +1,43 @@
 # Changelog
 
+## v1.0.5 — November 2026
+
+Fine-grained GPU acceleration control across all ONNX and LLM stages, expanded local LLM lineup with shader-f16 feature filtering, real job timeouts with active abort signals, anti-smear inpainting for outlined text, split series context storage with sync quota protection, and enhanced OCR Auto-Detect with transparent LLM diagnostics.
+
+### Added
+
+- **Fine-grained GPU acceleration toggles:** Independent hardware acceleration switches for Translation (LLM), Inpainting (LaMa), Text Recognition (OCR), and Bubble Detection with automatic WASM CPU fallbacks
+- **Expanded local LLM lineup:** Added Japanese-tuned Gemma-2-2B-JPN, Hermes-3-Llama-3.2-3B, Phi-4-Mini (3.8B), and Qwen3.5-9B models with clear download size (MB/GB) indicators in setup and settings
+- **WebGPU shader-f16 feature gating:** Hardware feature detection checks for `shader-f16` support before loading half-precision models, preventing initialization crashes on unsupported GPUs
+- **Active job cancellation & dynamic timeouts:** Real `AbortSignal` propagation to Gemini, API Mode fetch requests, and WebLLM `interruptGenerate()`, paired with box-density-scaled timeout budgets (`resolveJobTimeout`)
+- **Anti-smear inpainting for outlined text:** Two-sided ink seeding (`INK_SIDE_MIN_GAP`, `TELEA_SEAL`) and `teleaMask` to prevent Telea fast-marching from sampling hollow cores and smearing stroked/outlined manga lettering
+- **Split series context storage:** User summary and glossary stored in `sync:` with strict 8 KB UTF-8 caps; translation history stored in `local:` to prevent browser sync quota errors
+- **Reset Series Context action:** Direct UI controls in popup and sidebar to reset accumulated context history when starting new chapters or series
+- **Rich LLM run diagnostics:** Debug panel displays raw responses (up to 4 KB), token truncation flags, prompt character counts, round-trip call counts, and finish reasons
+- **Schema validator & auto-healing:** Added `src/lib/server/validator.ts` with strict JSON structure validation and count mismatch detection
+
+### Changed
+
+- **Auto-Detect script resolution:** Mixed or inconclusive pages now fall back to the highest-confidence gate label (`bestLabel`) instead of defaulting to Latin, and prompts explicitly pass the detected script family
+- **GPU runtime architecture:** Centralized `src/lib/gpu-runtime.ts` manages effective GPU state snapshots across all ORT session loaders
+- **Local VRAM lifecycle management:** Switching translation modes cleanly unloads the WebLLM engine (`releaseLocalLlm`) and defers cleanup when a translation job is in flight (`withLocalLlmJob`)
+- **API Mode retry policy:** Retries now only run on transient transport or 429/5xx errors, never on user aborts or schema/parse errors
+- **Background semaphore safety:** Background worker guard timeouts now use `budget + 5s`, ensuring semaphores are never released prematurely while inference requests remain active
+
+### Fixed
+
+- **Chrome sync storage quota exceptions:** Split storage architecture prevents series context data from exceeding `QUOTA_BYTES_PER_ITEM` (8192 bytes)
+- **Concurrent series context race conditions:** Implemented read-modify-write pattern with serialized write queue during multi-page auto-translation
+- **Telea text core smearing:** Fixed fast-marching edge sampling on stroked manga fonts and sound effects
+- **Unprobed WebGPU fallbacks:** Fixed issue where devices with unprobed GPU state silently forced WASM CPU mode instead of checking `navigator.gpu`
+
+### Technical
+
+- Added `src/lib/gpu-runtime.ts` for unified, synchronous GPU state queries across ORT loaders
+- Added `src/lib/timeouts.ts` for centralized, testable job timeout calculations
+- Added `src/lib/series-context.ts` pure business logic model and `src/lib/series-context-store.ts` persistence layer
+- Added unit tests for GPU policy (`tests/unit/gpu-policy.test.ts`), WebLLM release (`tests/unit/webllm-release.test.ts`), series context (`tests/unit/series-context.test.ts`), and outlined inpainting (`tests/unit/inpaint-ladder.test.ts`)
+
 ## v1.0.4 — November 2026
 
 Firefox compatibility enhancements, canvas support for manga readers, improved overlay interaction, and reliability fixes across the translation pipeline.

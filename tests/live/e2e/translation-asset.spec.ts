@@ -1,7 +1,14 @@
 import { test, expect } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
-import { translateWithServer, testServerConnection, type ServerConfig } from "../../src/lib/server/main";
+import { translateWithServer, testServerConnection, type ServerConfig } from "../../../src/lib/server/main";
+
+/**
+ * Live-only spec (see `playwright.live.config.ts`). It needs a real
+ * OpenAI-compatible endpoint on :8033, so it is excluded from `test:e2e` —
+ * CI must never download or boot a model backend. Run it with
+ * `bun run test:e2e:live` after starting `bun run mock:llm` (or a real server).
+ */
 
 const ASSET_PATH = path.resolve(process.cwd(), "tests/assets/vertical-japanese-test.png");
 const OUTPUT_DIR = path.resolve(process.cwd(), "tests/output");
@@ -16,12 +23,13 @@ const apiConfig: ServerConfig = {
 };
 
 test("translation pipeline via API mode (tiny-aya-fire-q4_k_m) on manga asset exports jpg", async ({ page }) => {
-  try {
-    const conn = await testServerConnection(apiConfig);
-    test.skip(!conn.success, "Local translation server at localhost:8033 is offline");
-  } catch {
-    test.skip(true, "Local translation server at localhost:8033 is offline");
-  }
+  // Opt-in suite: an offline endpoint is a hard failure, not a skip. A skip
+  // here would report green while nothing was exercised.
+  const conn = await testServerConnection(apiConfig);
+  expect(
+    conn.success,
+    `Live translation server at ${apiConfig.serverHost} is offline — start \`bun run mock:llm\` (or a real server) first`,
+  ).toBe(true);
 
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 

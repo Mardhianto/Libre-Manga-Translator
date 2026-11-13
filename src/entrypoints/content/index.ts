@@ -50,6 +50,12 @@ function runDiagnosticFields(d?: TranslationDiagnostics) {
     llmCalls: d?.llmCalls,
     finishReason: d?.finishReason,
     promptChars: d?.promptChars,
+    promptTokens: d?.promptTokens,
+    promptEvalCount: d?.promptEvalCount,
+    numCtx: d?.numCtx,
+    thinkingDisabled: d?.thinkingDisabled,
+    budgetLevel: d?.budgetLevel,
+    budgetWarning: d?.budgetWarning,
     padded: d?.padded,
     truncated: d?.truncated,
   };
@@ -451,6 +457,15 @@ export default defineContentScript({
                     seriesContext.lastPageIndex !== null &&
                     resolvedPage === seriesContext.lastPageIndex + 1;
 
+                  // Re-running the page we just translated is not a
+                  // discontinuity (LMT-031): `isContinuous` is false for it,
+                  // and passing that through as `resetHistory` wiped every
+                  // other page's history on a Refine -> Translate.
+                  const isSamePage =
+                    seriesContext.lastChapterId === chapterId &&
+                    seriesContext.lastPageIndex !== null &&
+                    resolvedPage === seriesContext.lastPageIndex;
+
                   const curMode =
                     (cfg["sync:current-mode"] as string | undefined) ??
                     DefaultConfig.currentMode;
@@ -492,6 +507,8 @@ export default defineContentScript({
                     "local:server-model",
                     "local:use-server-api-key",
                     "local:server-api-key",
+                    "local:server-num-ctx",
+                    "local:server-disable-thinking",
                     "sync:script-gate",
                   ]);
                   const runtime = Object.fromEntries(
@@ -523,6 +540,12 @@ export default defineContentScript({
                       serverModel: runtime["local:server-model"] as string | undefined,
                       useServerApiKey: runtime["local:use-server-api-key"] as boolean | undefined,
                       serverApiKey: runtime["local:server-api-key"] as string | undefined,
+                      serverNumCtx:
+                        (runtime["local:server-num-ctx"] as number | undefined) ??
+                        DefaultConfig.serverNumCtx,
+                      serverDisableThinking:
+                        (runtime["local:server-disable-thinking"] as boolean | undefined) ??
+                        DefaultConfig.serverDisableThinking,
                       scriptGate:
                         (runtime["sync:script-gate"] as boolean | undefined) ??
                         DefaultConfig.scriptGate,
@@ -683,7 +706,7 @@ export default defineContentScript({
                       // Never feed an echoed source line into the next prompt.
                       visibleTranslations,
                       context,
-                      { resetHistory: !isContinuous, diagnostics },
+                      { resetHistory: !isContinuous && !isSamePage, diagnostics },
                     ).catch((err) => console.warn("LMT: series-context update failed:", err));
                   } else {
                     console.warn(

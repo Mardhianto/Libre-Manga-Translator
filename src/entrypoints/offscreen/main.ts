@@ -48,6 +48,10 @@ function serverConfig(config: Record<string, any>) {
     useServerApiKey: config.useServerApiKey,
     serverApiKey: config.serverApiKey,
     temperature: config.llmTemperature,
+    // Prompt budget knobs (LMT-024). Absent values fall back to
+    // `DefaultConfig` inside `callServer`.
+    numCtx: config.serverNumCtx,
+    disableThinking: config.serverDisableThinking,
   };
 }
 

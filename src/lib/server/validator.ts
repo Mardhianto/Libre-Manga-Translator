@@ -93,6 +93,18 @@ export interface LlmRunInfo {
   promptChars?: number;
   /** LLM requests spent on this page (format fallbacks + correction round). */
   llmCalls?: number;
+  /** Estimated prompt tokens (LMT-024). */
+  promptTokens?: number;
+  /** The server's own prompt count - the ground truth for the estimate. */
+  promptEvalCount?: number;
+  /** Context window the request asked for; native Ollama only. */
+  numCtx?: number;
+  /** True when the request actually carried `think:false` / `reasoning_effort`. */
+  thinkingDisabled?: boolean;
+  /** Prompt-size verdict: ok / warn / over. */
+  budgetLevel?: "ok" | "warn" | "over";
+  /** Why the prompt will not fit, when it will not. */
+  budgetWarning?: string;
 }
 
 /** Raw answers are capped before they reach storage: 50 debug entries × a
@@ -137,12 +149,21 @@ export function isTruncatedFinishReason(
 export function mergeRunInfo(calls: LlmRunInfo[]): LlmRunInfo {
   if (calls.length === 0) return {};
   const last = calls[calls.length - 1];
+  const first = calls[0];
   return {
     rawResponse: last.rawResponse,
     finishReason: last.finishReason,
     // The first call's prompt is the page's baseline; the correction prompt is
     // longer and would overstate what a normal page costs.
-    promptChars: calls[0].promptChars,
+    promptChars: first.promptChars,
+    promptTokens: first.promptTokens,
+    promptEvalCount: last.promptEvalCount ?? first.promptEvalCount,
+    // Request knobs come from the first answered call: a format fallback
+    // re-sends the same window, so the last one is not more truthful.
+    numCtx: first.numCtx,
+    thinkingDisabled: first.thinkingDisabled,
+    budgetLevel: first.budgetLevel,
+    budgetWarning: first.budgetWarning,
     llmCalls: calls.length,
   };
 }
@@ -302,6 +323,12 @@ export function validateTranslationResult(
             finishReason: run.finishReason,
             promptChars: run.promptChars,
             llmCalls: run.llmCalls,
+            promptTokens: run.promptTokens,
+            promptEvalCount: run.promptEvalCount,
+            numCtx: run.numCtx,
+            thinkingDisabled: run.thinkingDisabled,
+            budgetLevel: run.budgetLevel,
+            budgetWarning: run.budgetWarning,
             truncated: isTruncatedFinishReason(run.finishReason),
             // This validator never invents entries; the flag exists so the
             // Debug export can prove that in one line (LMT-032).

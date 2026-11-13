@@ -51,27 +51,11 @@ jobs:
       - name: OCR runtime CSP audit
         run: bun run check:ocr-audit
 
-      # The live LLM suite skips itself when nothing serves :8033. A background
-      # process outlives its step, so the stub stays up for the unit tests below.
-      - name: Start mock LLM server
-        shell: bash
-        run: |
-          nohup bun run mock:llm > mock-llm.log 2>&1 &
-          echo $! > mock-llm.pid
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8033/v1/models > /dev/null; then
-              echo "mock LLM server ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "::error::mock LLM server did not answer on :8033 within 30s"
-          cat mock-llm.log
-          exit 1
-
-      # Any skip means a suite silently did not run, so it fails the build.
-      # `shell: bash` matters: the default run shell has no pipefail, and the
-      # tee below would otherwise swallow a failing test run.
+      # No live-LLM step here on purpose. `tests/live/` (and
+      # `playwright.live.config.ts`) need a running model backend, so CI must
+      # never boot the mock stub or download Ollama/LM Studio. The mock server
+      # used to stay up for a live suite that lived inside `tests/unit/`; that
+      # suite now lives in `tests/live/` and is opt-in (`bun run test:live`).
       - name: Run unit tests (no skips allowed)
         shell: bash
         run: |
@@ -81,12 +65,6 @@ jobs:
             echo "::error::unit tests reported skipped tests; every suite must run in CI"
             exit 1
           fi
-
-      # Stop the stub so the E2E run below behaves as before: its translation
-      # spec still skips visibly (test.skip) until it is verified against the stub.
-      - name: Stop mock LLM server
-        shell: bash
-        run: kill "$(cat mock-llm.pid)" || true
 
       - name: Build extension
         run: bun run build

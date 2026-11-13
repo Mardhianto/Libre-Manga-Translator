@@ -35,6 +35,8 @@
   let serverHost = $state(DefaultConfig.serverHost);
   let serverSchema = $state(DefaultConfig.serverSchema);
   let serverModel = $state(DefaultConfig.serverModel);
+  let serverNumCtx = $state(DefaultConfig.serverNumCtx);
+  let serverDisableThinking = $state(DefaultConfig.serverDisableThinking);
   let useServerApiKey = $state(DefaultConfig.useServerApiKey);
   let serverApiKey = $state(DefaultConfig.serverApiKey);
   let selectedLlmModel = $state(DefaultConfig.llmModels[0].id);
@@ -78,6 +80,11 @@
             { key: "local:server-host", value: serverHost.trim() },
             { key: "local:server-schema", value: serverSchema },
             { key: "local:server-model", value: serverModel.trim() },
+            { key: "local:server-num-ctx", value: serverNumCtx },
+            {
+              key: "local:server-disable-thinking",
+              value: serverDisableThinking,
+            },
             { key: "local:use-server-api-key", value: useServerApiKey },
             ...(useServerApiKey && serverApiKey.trim()
               ? [
@@ -187,6 +194,8 @@
                 bind:serverHost
                 bind:serverSchema
                 bind:serverModel
+                bind:serverNumCtx
+                bind:serverDisableThinking
                 bind:useServerApiKey
                 bind:serverApiKey
                 onBack={() => goTo("mode")}

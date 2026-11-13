@@ -327,7 +327,7 @@ src/
     inpaint/             # Fast ladder + Quality LaMa-first: mask fit, ring stats, planar fill, denoise, LaMa, Telea, decline metric
     ocr/                 # main.ts (coordinator) + types.ts + paddle.ts + manga-ocr.ts + pororo.ts + utils.ts (in-tree JS CTC, zero eval)
     prompts.ts           # Shared prompt builders for all backends
-    server/              # API Mode: schemas.ts + validator.ts + main.ts (Ollama/LM Studio)
+    server/              # API Mode: schemas.ts (openai/lmstudio/ollama bodies) + prompt-budget.ts + validator.ts + main.ts
     utils.ts             # Canvas painting, text fitting, bbox math, cache hashing, SHA-256-verified HF download
     webllm.ts            # WebLLM loader and translation interface (validated output)
 
@@ -359,6 +359,8 @@ bun run check:ocr-audit # MV3 CSP audit — zero eval/new Function
 bun run test:unit       # unit test suite via bun test (SSRF, validator, boxes, telea, adapters)
 bun run test:e2e        # extension E2E suite via Playwright (service worker, popup, setup, content UI)
 bun run test            # unit + e2e tests
+bun run test:live       # opt-in live LLM suite (needs a server on :8033; start `bun run mock:llm`)
+bun run test:e2e:live   # opt-in live translation E2E (same :8033 requirement)
 bun run prepublish:check # full pre-publish gate (check -> audit -> unit -> build -> e2e -> firefox)
 bun run check:inpaint   # inpaint ladder self-check (scripts/, no framework)
 bun run check:gate      # script gate + region build self-check
@@ -377,7 +379,7 @@ bun run zip             # package Chrome extension zip
 bun run zip:firefox     # package Firefox extension zip
 ```
 
-Manual test matrix: Local hover-pill translate; Gemini with API key; API Mode against Ollama (`http://127.0.0.1:11434/v1`) with **Test Connection**; Fast inpaint on flat-paper balloon (no ghost rectangle); Japanese page with a Latin SFX box → dashed amber + **Translate anyway**; auto-translate on a chapter reader (one page at a time, no VRAM OOM); Quality inpaint with LaMa weights and the model toggled off mid-page → painted clusters survive, unpainted boxes are cleaned by the ladder, and the Debug Panel's LaMa line counts painted / too small / failed / not-attempted boxes with the first real LaMa error beneath it.
+Manual test matrix: Local hover-pill translate; Gemini with API key; API Mode against Ollama (`http://127.0.0.1:11434`, schema **Ollama (native)**, `bun run scripts/ollama-live-check.ts` for the 40-box/history acceptance) with **Test Connection**; API Mode against LM Studio (`http://127.0.0.1:1234`, schema **LM Studio**, `bun run lmstudio:live` for the same acceptance — it must answer, not return reasoning, and must report the loaded window); Fast inpaint on flat-paper balloon (no ghost rectangle); Japanese page with a Latin SFX box → dashed amber + **Translate anyway**; auto-translate on a chapter reader (one page at a time, no VRAM OOM); Quality inpaint with LaMa weights and the model toggled off mid-page → painted clusters survive, unpainted boxes are cleaned by the ladder, and the Debug Panel's LaMa line counts painted / too small / failed / not-attempted boxes with the first real LaMa error beneath it.
 
 ## Model & Runtime Licenses
 

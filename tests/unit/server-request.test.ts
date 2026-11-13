@@ -1,15 +1,18 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { buildTranslationPrompts } from "../../src/lib/prompts";
 import {
-  buildLmStudioTextRequest,
+  buildOllamaChatRequest,
   buildOpenAITextRequest,
+  resolveChatEndpoint,
   type ServerConfig,
 } from "../../src/lib/server/schemas";
 import {
   makeSiteRuleWithServer,
+  testServerConnection,
   translateWithServer,
 } from "../../src/lib/server/main";
 import { TranslationValidationError } from "../../src/lib/server/validator";
+import { resolveOutputCap } from "../../src/lib/server/prompt-budget";
 
 const openaiConfig: ServerConfig = {
   serverHost: "http://localhost:8033/v1",
@@ -23,6 +26,16 @@ const openaiConfig: ServerConfig = {
 const lmstudioConfig: ServerConfig = {
   ...openaiConfig,
   serverSchema: "lmstudio",
+};
+
+const ollamaConfig: ServerConfig = {
+  serverHost: "http://127.0.0.1:11434/v1",
+  serverSchema: "ollama",
+  serverModel: "qwen3.5:2b",
+  useServerApiKey: false,
+  serverApiKey: "",
+  temperature: 0.3,
+  numCtx: 4096,
 };
 
 const originalFetch = globalThis.fetch;
@@ -42,9 +55,47 @@ function openAIResponse(content: unknown, finishReason = "stop") {
   );
 }
 
-function lmStudioResponse(content: unknown) {
+function lmStudioResponse(content: unknown, finishReason = "stop") {
+  // LM Studio serves the OpenAI API, so the reply is an OpenAI reply
+  // (LMT-018/033).
   return new Response(
-    JSON.stringify({ output: [{ content: JSON.stringify(content) }] }),
+    JSON.stringify({
+      choices: [
+        {
+          message: { role: "assistant", content: JSON.stringify(content) },
+          finish_reason: finishReason,
+        },
+      ],
+      usage: { prompt_tokens: 128, completion_tokens: 16 },
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  );
+}
+
+/** Native Ollama `/api/chat` reply shape (LMT-024). */
+function ollamaResponse(
+  content: unknown,
+  opts: {
+    doneReason?: string;
+    promptEvalCount?: number;
+    evalCount?: number;
+    reasoning?: string;
+  } = {},
+) {
+  return new Response(
+    JSON.stringify({
+      model: "qwen3.5:2b",
+      message: {
+        role: "assistant",
+        content:
+          typeof content === "string" ? content : JSON.stringify(content),
+        ...(opts.reasoning ? { reasoning: opts.reasoning } : {}),
+      },
+      done: true,
+      done_reason: opts.doneReason ?? "stop",
+      prompt_eval_count: opts.promptEvalCount ?? 0,
+      eval_count: opts.evalCount ?? 0,
+    }),
     { status: 200, headers: { "Content-Type": "application/json" } },
   );
 }
@@ -93,8 +144,11 @@ describe("request bodies carry the strict schema", () => {
     expect(body.response_format).toEqual({ type: "json_object" });
   });
 
-  it("keeps the LM Studio native body shape while adding the format", () => {
-    const body = buildLmStudioTextRequest(
+  it("builds the OpenAI body for LM Studio (no native input array)", () => {
+    // The LM Studio schema resolves to /v1/chat/completions, so it must send an
+    // OpenAI body: `input[]` / `system_prompt` are native-endpoint fields and
+    // `/v1` rejects them (LMT-018/033).
+    const body = buildOpenAITextRequest(
       "model",
       "system",
       "user",
@@ -103,16 +157,18 @@ describe("request bodies carry the strict schema", () => {
       "json_schema",
     ) as any;
 
-    expect(body.input).toEqual([{ type: "text", content: "user" }]);
-    expect(body.system_prompt).toBe("system");
+    expect(body.messages).toEqual([
+      { role: "system", content: "system" },
+      { role: "user", content: "user" },
+    ]);
     expect(body.response_format.type).toBe("json_schema");
-    expect(body.response_format.json_schema.strict).toBe(true);
+    expect(body.input).toBeUndefined();
+    expect(body.system_prompt).toBeUndefined();
   });
 });
 
 describe("callServer response_format fallback", () => {
-  it("retries a rejected OpenAI json_schema once as json_object", async () => {
-    const calls: any[] = [];
+  it("retries a rejected OpenAI json_schema once as json_object", async () => {    const calls: any[] = [];
     globalThis.fetch = (async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
       calls.push(body);
@@ -134,13 +190,14 @@ describe("callServer response_format fallback", () => {
     expect(calls[1].response_format).toEqual({ type: "json_object" });
   });
 
-  it("walks LM Studio through json_object to no response_format", async () => {
+  it("walks LM Studio through json_schema to json_object", async () => {
     const calls: any[] = [];
-    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      urls.push(String(url));
       const body = JSON.parse(String(init?.body));
       calls.push(body);
       if (calls.length === 1) return new Response("nope", { status: 400 });
-      if (calls.length === 2) return new Response("nope", { status: 422 });
       return lmStudioResponse({ translations: ["A"] });
     }) as unknown as typeof fetch;
 
@@ -153,10 +210,34 @@ describe("callServer response_format fallback", () => {
     );
 
     expect(result.translations).toEqual(["A"]);
-    expect(calls).toHaveLength(3);
+    expect(calls).toHaveLength(2);
     expect(calls[0].response_format.type).toBe("json_schema");
     expect(calls[1].response_format).toEqual({ type: "json_object" });
-    expect(calls[2].response_format).toBeUndefined();
+    // Both attempts go to the OpenAI API, never the native endpoint.
+    expect(urls).toEqual([
+      "http://localhost:8033/v1/chat/completions",
+      "http://localhost:8033/v1/chat/completions",
+    ]);
+    expect(calls[0].input).toBeUndefined();
+    expect(calls[0].system_prompt).toBeUndefined();
+  });
+
+  it("sends reasoning_effort on the LM Studio path too", async () => {
+    const bodies: any[] = [];
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return lmStudioResponse({ translations: ["A"] });
+    }) as unknown as typeof fetch;
+
+    await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      { ...lmstudioConfig, disableThinking: true },
+    );
+
+    expect(bodies[0].reasoning_effort).toBe("none");
   });
 
   it("does not downgrade on auth errors", async () => {
@@ -499,5 +580,587 @@ describe("auto-detect prompt clause (LMT-030)", () => {
     );
     expect(systemPrompt).toContain("FROM JAPANESE INTO ENGLISH");
     expect(systemPrompt).not.toContain("auto-detected");
+  });
+});
+
+describe("native Ollama schema (LMT-024)", () => {
+  const { schema } = buildTranslationPrompts(
+    ["こんにちは", "元気？"],
+    "English",
+    "Japanese",
+  );
+
+  it("builds a body carrying num_ctx, think, and format", () => {
+    const body = buildOllamaChatRequest(
+      "qwen3.5:2b",
+      "system",
+      "user",
+      { numCtx: 8192, numPredict: 2048, temperature: 0.3, disableThinking: true },
+      schema,
+    ) as any;
+
+    expect(body.stream).toBe(false);
+    expect(body.think).toBe(false);
+    expect(body.format).toEqual(schema);
+    expect(body.options.num_ctx).toBe(8192);
+    expect(body.options.num_predict).toBe(2048);
+    expect(body.options.temperature).toBe(0.3);
+    expect(body.messages).toEqual([
+      { role: "system", content: "system" },
+      { role: "user", content: "user" },
+    ]);
+    // The OpenAI-shaped fields must not leak into the native body.
+    expect(body.max_tokens).toBeUndefined();
+    expect(body.response_format).toBeUndefined();
+  });
+
+  it("omits think when thinking is not being disabled", () => {
+    const body = buildOllamaChatRequest(
+      "m",
+      "s",
+      "u",
+      { numCtx: 4096, numPredict: 1024, temperature: 0.3, disableThinking: false },
+      schema,
+    ) as any;
+    expect(body.think).toBeUndefined();
+  });
+
+  it("degrades format to a plain json string, then omits it", () => {
+    const json = buildOllamaChatRequest(
+      "m",
+      "s",
+      "u",
+      { numCtx: 4096, numPredict: 1024, temperature: 0.3 },
+      schema,
+      "json_object",
+    ) as any;
+    expect(json.format).toBe("json");
+
+    const none = buildOllamaChatRequest(
+      "m",
+      "s",
+      "u",
+      { numCtx: 4096, numPredict: 1024, temperature: 0.3 },
+      schema,
+      "none",
+    ) as any;
+    expect(none.format).toBeUndefined();
+  });
+
+  it("resolves the native endpoint from every host shape users paste", () => {
+    expect(resolveChatEndpoint("http://127.0.0.1:11434/v1", "ollama")).toBe(
+      "http://127.0.0.1:11434/api/chat",
+    );
+    expect(resolveChatEndpoint("http://127.0.0.1:11434", "ollama")).toBe(
+      "http://127.0.0.1:11434/api/chat",
+    );
+    expect(resolveChatEndpoint("http://127.0.0.1:11434/", "ollama")).toBe(
+      "http://127.0.0.1:11434/api/chat",
+    );
+    expect(resolveChatEndpoint("http://127.0.0.1:11434/api", "ollama")).toBe(
+      "http://127.0.0.1:11434/api/chat",
+    );
+    // Other schemas keep their existing paths untouched.
+    expect(resolveChatEndpoint("http://localhost:8033/v1", "openai")).toBe(
+      "http://localhost:8033/v1/chat/completions",
+    );
+  });
+
+  it("resolves LM Studio from every host shape to the OpenAI API", () => {
+    // Every one of these is a host a user may already have saved. The native
+    // endpoint `/api/v1/chat` cannot disable thinking, so all of them have to
+    // land on `/v1/chat/completions` (LMT-018/033).
+    for (const host of [
+      "http://localhost:1234",
+      "http://localhost:1234/",
+      "http://localhost:1234/api/v1",
+      "http://localhost:1234/api/v1/",
+      "http://localhost:1234/api/v0",
+      "http://localhost:1234/api",
+      "http://localhost:1234/v1",
+    ]) {
+      expect(resolveChatEndpoint(host, "lmstudio")).toBe(
+        "http://localhost:1234/v1/chat/completions",
+      );
+    }
+  });
+
+  it("posts to /api/chat and parses the native reply", async () => {
+    let seenUrl = "";
+    globalThis.fetch = (async (url: string) => {
+      seenUrl = String(url);
+      return ollamaResponse({ translations: ["Hello", "Fine?"] }, {
+        promptEvalCount: 312,
+        evalCount: 24,
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは", "元気？"],
+      "English",
+      "Japanese",
+      undefined,
+      ollamaConfig,
+    );
+
+    expect(seenUrl).toBe("http://127.0.0.1:11434/api/chat");
+    expect(result.translations).toEqual(["Hello", "Fine?"]);
+  });
+
+  it("reports the server's own prompt count against the estimate", async () => {
+    globalThis.fetch = (async () =>
+      ollamaResponse({ translations: ["A"] }, {
+        promptEvalCount: 640,
+      })) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      ollamaConfig,
+    );
+
+    const d = result.diagnostics!;
+    expect(d.promptEvalCount).toBe(640);
+    expect(d.promptTokens).toBeGreaterThan(0);
+    expect(d.numCtx).toBeGreaterThanOrEqual(4096);
+    expect(d.thinkingDisabled).toBe(true);
+  });
+
+  it("flags a native length stop as truncated", async () => {
+    globalThis.fetch = (async () =>
+      ollamaResponse({ translations: ["A"] }, {
+        doneReason: "length",
+      })) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      ollamaConfig,
+    );
+
+    expect(result.diagnostics?.finishReason).toBe("length");
+    expect(result.diagnostics?.truncated).toBe(true);
+  });
+
+  it("scales the answer budget with the box count", async () => {
+    const bodies: any[] = [];
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      const count = bodies.length === 1 ? 40 : 40;
+      return ollamaResponse({
+        translations: new Array(count).fill("x"),
+      });
+    }) as unknown as typeof fetch;
+
+    const boxes = new Array(40).fill("こんにちは");
+    await translateWithServer(
+      boxes,
+      "English",
+      "Japanese",
+      undefined,
+      ollamaConfig,
+    );
+
+    expect(bodies[0].options.num_predict).toBe(resolveOutputCap(40));
+    expect(bodies[0].options.num_predict).toBeGreaterThan(1024);
+  });
+
+  it("grows num_ctx past the requested window when the page needs it", async () => {
+    const bodies: any[] = [];
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return ollamaResponse({ translations: new Array(40).fill("x") });
+    }) as unknown as typeof fetch;
+
+    // A history-heavy page: the prompt alone is far past 4096 tokens.
+    const history = new Array(5).fill({
+      chapterId: "c1",
+      pageIndex: 1,
+      text: "あ".repeat(1100),
+    });
+    await translateWithServer(
+      new Array(40).fill("こんにちは、今日はいい天気ですね。"),
+      "English",
+      "Japanese",
+      {
+        seriesName: "T",
+        summary: "summary",
+        dictionary: "term -> gloss",
+        lastChapterId: "c1",
+        lastPageIndex: 5,
+        recentHistory: history,
+        translatedCount: 5,
+      },
+      ollamaConfig,
+    );
+
+    expect(bodies[0].options.num_ctx).toBeGreaterThan(4096);
+  });
+
+  it("drops `think` once when the server rejects the field", async () => {
+    const bodies: any[] = [];
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      if (bodies.length === 1) {
+        return new Response("unknown field `think`", { status: 400 });
+      }
+      return ollamaResponse({ translations: ["A"] });
+    }) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      ollamaConfig,
+    );
+
+    expect(result.translations).toEqual(["A"]);
+    expect(bodies[0].think).toBe(false);
+    expect(bodies[1].think).toBeUndefined();
+    // One fallback, not a loop.
+    expect(bodies.length).toBe(2);
+  });
+
+  it("labels a reasoning-only answer instead of reporting an empty one", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: { content: "", reasoning: "Thinking Process: ..." },
+              finish_reason: "length",
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as unknown as typeof fetch;
+
+    const error = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+    ).catch((e) => e);
+
+    expect(error.message).toContain("reasoning text but no answer");
+  });
+
+  it("sends reasoning_effort on the OpenAI path only when asked", async () => {
+    const bodies: any[] = [];
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return openAIResponse({ translations: ["A"] });
+    }) as unknown as typeof fetch;
+
+    await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      { ...openaiConfig, disableThinking: true },
+    );
+    await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      openaiConfig,
+    );
+
+    expect(bodies[0].reasoning_effort).toBe("none");
+    expect(bodies[1].reasoning_effort).toBeUndefined();
+  });
+
+  it("drops reasoning_effort once when a strict server rejects it", async () => {
+    const bodies: any[] = [];
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      if (bodies.length === 1) {
+        return new Response("Unrecognized request argument: reasoning_effort", {
+          status: 400,
+        });
+      }
+      return openAIResponse({ translations: ["A"] });
+    }) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      { ...openaiConfig, disableThinking: true },
+    );
+
+    expect(result.translations).toEqual(["A"]);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1].reasoning_effort).toBeUndefined();
+  });
+});
+
+describe("LM Studio via the OpenAI API (LMT-018/033)", () => {
+  it("returns the answer when the reply also carries reasoning", async () => {
+    // The LMT-033 shape: a thinking model fills `reasoning_content` and still
+    // answers. Reading a fixed item index used to return the reasoning (or an
+    // empty string) instead of the answer.
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: '{"translations":["Hello"]}',
+                reasoning_content: "Thinking Process: the box says hello...",
+                tool_calls: null,
+              },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 210, completion_tokens: 9 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      lmstudioConfig,
+    );
+
+    expect(result.translations).toEqual(["Hello"]);
+    // The answer, never the reasoning, becomes the raw response.
+    expect(result.diagnostics?.rawResponse).toBe('{"translations":["Hello"]}');
+    expect(result.diagnostics?.rawResponse).not.toContain("Thinking Process");
+  });
+
+  it("names the thinking failure when only reasoning came back", async () => {
+    // LM Studio spells it `reasoning_content`, not `reasoning`. The old sniff
+    // missed it and reported a bare "Empty response".
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "",
+                reasoning_content: "Thinking Process: analysing the request...",
+              },
+              finish_reason: "length",
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )) as unknown as typeof fetch;
+
+    const error = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      lmstudioConfig,
+    ).catch((e) => e);
+
+    expect(error.message).toContain("reasoning text but no answer");
+    expect(error.message).not.toContain("Empty response");
+  });
+
+  it("flags truncation from the OpenAI stop reason", async () => {
+    // The native reply had no finish_reason at all, so `truncated` could never
+    // become true on this path (LMT-032).
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return lmStudioResponse({ translations: ["A"] }, "length");
+    }) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      lmstudioConfig,
+    );
+
+    expect(result.diagnostics?.finishReason).toBe("length");
+    expect(result.diagnostics?.truncated).toBe(true);
+    expect(calls).toBe(1);
+  });
+
+  it("reports the server's own prompt count from usage", async () => {
+    globalThis.fetch = (async () =>
+      lmStudioResponse({ translations: ["A"] })) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      ["こんにちは"],
+      "English",
+      "Japanese",
+      undefined,
+      lmstudioConfig,
+    );
+
+    expect(result.diagnostics?.promptEvalCount).toBe(128);
+    expect(result.diagnostics?.promptTokens).toBeGreaterThan(0);
+  });
+
+  it("does not claim the prompt will be cut when it cannot know the window", async () => {
+    // The Ollama verdict warned "the server will cut the start of the prompt"
+    // using our own computed window. LM Studio picks its own and rejects an
+    // over-long page loudly instead, so that warning must not appear here
+    // (LMT-018).
+    globalThis.fetch = (async () =>
+      lmStudioResponse({ translations: new Array(40).fill("x") })) as unknown as typeof fetch;
+
+    const result = await translateWithServer(
+      new Array(40).fill("こんにちは、今日はいい天気ですね。"),
+      "English",
+      "Japanese",
+      undefined,
+      lmstudioConfig,
+    );
+
+    expect(result.diagnostics?.budgetLevel).toBeUndefined();
+    expect(result.diagnostics?.budgetWarning).toBeUndefined();
+  });
+});
+
+describe("server probe (LMT-024)", () => {
+  it("reads /api/tags for the native schema", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: string) => {
+      urls.push(String(url));
+      return new Response(
+        JSON.stringify({ models: [{ name: "qwen3.5:2b" }, { model: "llama3.2" }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await testServerConnection(ollamaConfig);
+
+    expect(urls[0]).toBe("http://127.0.0.1:11434/api/tags");
+    expect(result.success).toBe(true);
+    expect(result.provider).toBe("ollama");
+    expect(result.models).toEqual(["qwen3.5:2b", "llama3.2"]);
+  });
+
+  it("fails loud when no Ollama answers /api/tags", async () => {
+    globalThis.fetch = (async () =>
+      new Response("nope", { status: 404 })) as unknown as typeof fetch;
+
+    const result = await testServerConnection(ollamaConfig);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("/api/tags");
+  });
+
+  it("suggests the native schema when Ollama hides behind the OpenAI path", async () => {
+    globalThis.fetch = (async (url: string) => {
+      if (String(url).endsWith("/api/tags")) {
+        return new Response(
+          JSON.stringify({ models: [{ name: "qwen3.5:2b" }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ data: [{ id: "qwen3.5:2b" }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await testServerConnection(openaiConfig);
+
+    expect(result.success).toBe(true);
+    expect(result.provider).toBe("ollama");
+    expect(result.suggestNativeOllama).toBe(true);
+  });
+
+  it("stays quiet on a plain OpenAI-compatible server", async () => {
+    globalThis.fetch = (async (url: string) => {
+      if (String(url).endsWith("/api/tags")) {
+        return new Response("nope", { status: 404 });
+      }
+      return new Response(JSON.stringify({ data: [{ id: "some-model" }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await testServerConnection(openaiConfig);
+
+    expect(result.success).toBe(true);
+    expect(result.provider).toBe("openai-compatible");
+    expect(result.suggestNativeOllama).toBeUndefined();
+  });
+
+  it("reports the context window LM Studio actually loaded", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: string) => {
+      urls.push(String(url));
+      if (String(url).endsWith("/api/v0/models")) {
+        return new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: "qwen3.5-9b",
+                state: "loaded",
+                loaded_context_length: 9216,
+              },
+              { id: "other", state: "not-loaded" },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ data: [{ id: "qwen3.5-9b" }, { id: "other" }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await testServerConnection({
+      ...lmstudioConfig,
+      serverHost: "http://localhost:1234/api/v1",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.provider).toBe("lmstudio");
+    // The window LM Studio allocated, not the one the user asked for.
+    expect(result.loadedContextLength).toBe(9216);
+    // It probes /v1/models (the path translate uses) and the native list.
+    expect(urls).toContain("http://localhost:1234/v1/models");
+    expect(urls).toContain("http://localhost:1234/api/v0/models");
+  });
+
+  it("warns when LM Studio has no model loaded", async () => {
+    globalThis.fetch = (async (url: string) => {
+      if (String(url).endsWith("/api/v0/models")) {
+        return new Response(
+          JSON.stringify({
+            data: [{ id: "qwen3.5-9b", state: "not-loaded" }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ data: [{ id: "qwen3.5-9b" }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await testServerConnection(lmstudioConfig);
+
+    expect(result.success).toBe(true);
+    expect(result.loadedContextLength).toBeUndefined();
+    expect(result.error).toContain("no model is loaded");
   });
 });

@@ -6,6 +6,8 @@
     serverHost = $bindable(""),
     serverSchema = $bindable("openai"),
     serverModel = $bindable(""),
+    serverNumCtx = $bindable(4096),
+    serverDisableThinking = $bindable(false),
     useServerApiKey = $bindable(false),
     serverApiKey = $bindable(""),
     onBack,
@@ -14,6 +16,8 @@
     serverHost?: string;
     serverSchema?: string;
     serverModel?: string;
+    serverNumCtx?: number;
+    serverDisableThinking?: boolean;
     useServerApiKey?: boolean;
     serverApiKey?: string;
     onBack: () => void;
@@ -24,18 +28,27 @@
     {
       id: "ollama",
       name: "Ollama",
-      defaultHost: "http://localhost:11434/v1",
-      defaultSchema: "openai",
-      defaultModel: "llama3.2",
+      // Native schema: only `/api/chat` can set num_ctx and think (LMT-024).
+      defaultHost: "http://localhost:11434",
+      defaultSchema: "ollama",
+      defaultModel: "qwen3.5:4b",
+      defaultNumCtx: 4096,
+      defaultDisableThinking: true,
       requiresApiKey: false,
       noteKey: "ollama",
     },
     {
       id: "lmstudio",
       name: "LM Studio",
-      defaultHost: "http://localhost:1234/api/v1",
+      // The OpenAI-compatible API. LM Studio's native `/api/v1/chat` cannot
+      // turn thinking off and returns a reasoning item instead of the answer,
+      // so the schema resolves `/v1/chat/completions` from this origin
+      // (LMT-018/033).
+      defaultHost: "http://localhost:1234",
       defaultSchema: "lmstudio",
       defaultModel: "",
+      defaultNumCtx: 4096,
+      defaultDisableThinking: true,
       requiresApiKey: false,
       noteKey: "lmstudio",
     },
@@ -45,6 +58,8 @@
       defaultHost: "http://localhost:1337",
       defaultSchema: "openai",
       defaultModel: "",
+      defaultNumCtx: 4096,
+      defaultDisableThinking: false,
       requiresApiKey: false,
       noteKey: "jan",
     },
@@ -54,6 +69,8 @@
       defaultHost: "http://localhost:8888",
       defaultSchema: "openai",
       defaultModel: "",
+      defaultNumCtx: 4096,
+      defaultDisableThinking: false,
       requiresApiKey: false,
       noteKey: "unsloth",
     },
@@ -63,6 +80,8 @@
       defaultHost: "http://localhost:8080/v1",
       defaultSchema: "openai",
       defaultModel: "",
+      defaultNumCtx: 4096,
+      defaultDisableThinking: false,
       requiresApiKey: true,
       noteKey: "llamacpp",
     },
@@ -72,6 +91,8 @@
       defaultHost: "http://localhost:5001/v1",
       defaultSchema: "openai",
       defaultModel: "",
+      defaultNumCtx: 4096,
+      defaultDisableThinking: false,
       requiresApiKey: false,
       noteKey: "koboldcpp",
     },
@@ -81,6 +102,8 @@
       defaultHost: "http://localhost:8080",
       defaultSchema: "openai",
       defaultModel: "",
+      defaultNumCtx: 4096,
+      defaultDisableThinking: false,
       requiresApiKey: false,
       noteKey: "localai",
     },
@@ -90,6 +113,8 @@
       defaultHost: "http://localhost:8000",
       defaultSchema: "openai",
       defaultModel: "",
+      defaultNumCtx: 4096,
+      defaultDisableThinking: false,
       requiresApiKey: true,
       noteKey: "cherrystudio",
     },
@@ -99,6 +124,8 @@
       defaultHost: "",
       defaultSchema: "openai",
       defaultModel: "",
+      defaultNumCtx: 4096,
+      defaultDisableThinking: false,
       requiresApiKey: false,
       noteKey: null,
     },
@@ -115,6 +142,8 @@
     serverHost = runner.defaultHost;
     serverSchema = runner.defaultSchema;
     serverModel = runner.defaultModel;
+    serverNumCtx = runner.defaultNumCtx;
+    serverDisableThinking = runner.defaultDisableThinking;
     useServerApiKey = runner.requiresApiKey;
     if (!runner.requiresApiKey) {
       serverApiKey = "";
@@ -345,6 +374,7 @@
           bind:value={serverSchema}
           class="w-full bg-[var(--bg-void)] border border-[var(--border-line)] rounded-xl p-2 text-xs outline-none cursor-pointer text-[var(--text-primary)]"
         >
+          <option value="ollama">Ollama (native)</option>
           <option value="openai">OpenAI-compatible</option>
           <option value="lmstudio">LM Studio</option>
         </select>
@@ -365,6 +395,62 @@
         />
       </div>
     </div>
+
+    <div class="space-y-1">
+      <div class="flex items-center justify-between">
+        <label for="setup-server-num-ctx" class="kicker text-[11px]">
+          Context Window
+        </label>
+        <span class="text-[10px] font-mono font-bold text-[var(--text-primary)]">
+          {serverNumCtx.toLocaleString("en-US")} tok
+        </span>
+      </div>
+      <input
+        id="setup-server-num-ctx"
+        type="number"
+        min="1024"
+        max="32768"
+        step="1024"
+        bind:value={serverNumCtx}
+        class="w-full bg-[var(--bg-void)] border border-[var(--border-line)] rounded-xl p-2.5 text-xs font-mono focus:border-[var(--accent-cyan)] outline-none transition-all text-[var(--text-primary)]"
+      />
+      <p class="text-[10px] text-[var(--text-dim)] leading-relaxed">
+        {#if serverSchema === "ollama"}
+          A page's prompt plus its answer must fit here, or Ollama cuts the
+          start of the prompt without reporting an error.
+        {:else}
+          Applies to the native Ollama schema only; other servers use their own
+          default window.
+        {/if}
+      </p>
+    </div>
+
+    <label class="flex items-center gap-2.5 cursor-pointer group select-none">
+      <div class="relative flex items-center shrink-0">
+        <input
+          type="checkbox"
+          bind:checked={serverDisableThinking}
+          class="peer sr-only"
+        />
+        <div
+          class="h-4 w-4 rounded-[4px] border border-[var(--border-line)] bg-[var(--bg-void)] peer-checked:bg-[var(--accent-cyan)] peer-checked:border-[var(--accent-cyan)] transition-all flex items-center justify-center"
+        >
+          <Check
+            size={11}
+            class="text-[#05040b] scale-0 peer-checked:scale-100 transition-transform stroke-[3]"
+          />
+        </div>
+      </div>
+      <span
+        class="text-xs font-medium text-[var(--text-primary)] group-hover:text-[var(--accent-cyan)] transition-colors"
+      >
+        Disable thinking
+      </span>
+    </label>
+    <p class="text-[10px] text-[var(--text-dim)] leading-relaxed -mt-2">
+      Reasoning tokens are billed to the answer budget, which is what makes
+      thinking models return an empty answer on long pages.
+    </p>
 
     <!-- API Key Toggle -->
     <div class="space-y-2 pt-1">
