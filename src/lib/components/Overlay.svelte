@@ -51,6 +51,8 @@
           diagnostics?: TranslationDiagnostics;
           gateSkip?: (GateReason | null)[];
           gate?: DebugEntry["gate"];
+          /** Box indices the recognizer failed or half-read (Phase B). */
+          ocrFailures?: number[];
         }
       | { error: string }
     >;
@@ -128,6 +130,14 @@
   let showOriginal = $state(false);
   let translations = $state<Translations>([]);
   let sourceTexts = $state<string[]>([]);
+  /**
+   * Boxes the recognizer failed or half-read on the last page run. They are
+   * the boxes whose bubble shows nothing and, before this, could not be
+   * retried without re-running the whole page.
+   */
+  let ocrFailures = $state<number[]>([]);
+  /** True when translation settings changed while this overlay was open. */
+  let isStale = $state(false);
   let editDrafts = $state<Translations>([]);
   let previousImageUrl = $state("");
   let activeIndex = $state<number | null>(null);
@@ -290,6 +300,11 @@
         );
       }
 
+      // A successful OCR re-read clears the failure marker for this box.
+      if (!skipOcr) {
+        ocrFailures = ocrFailures.filter((k) => k !== targetIndex);
+      }
+
       const successMsg = skipOcr
         ? `Box #${targetIndex + 1} retranslated from captured text. Press Apply to save.`
         : `Box #${targetIndex + 1} retranslated (OCR re-read). Press Apply to save.`;
@@ -447,6 +462,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
   }
 
   async function executeTranslation() {
+    isStale = false;
     mode = "loading";
     applyBboxesSort();
 
@@ -521,6 +537,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
 
     translations = result.translations ?? [];
     sourceTexts = result.sourceTexts ?? [];
+    ocrFailures = result.ocrFailures ?? [];
 
     const echoed = result.diagnostics?.untranslated?.length ?? 0;
     if (echoed > 0) {
@@ -528,6 +545,14 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
         `${echoed} box${echoed === 1 ? "" : "es"} echoed the source and ${
           echoed === 1 ? "was" : "were"
         } left untranslated.`,
+        "warn",
+      );
+    }
+
+    if (ocrFailures.length > 0) {
+      addToast(
+        `${ocrFailures.length} bubble${ocrFailures.length === 1 ? "" : "s"} could not be read ` +
+          `(OCR). Use "Retry OCR" on the marked bubble${ocrFailures.length === 1 ? "" : "s"}.`,
         "warn",
       );
     }
@@ -1134,11 +1159,20 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       }
     };
 
+    const handleSettingsChanged = () => {
+      isStale = true;
+      addToast(
+        "Settings changed since translation was made. Use Re-translate to apply.",
+        "info",
+      );
+    };
+
     wrapper.addEventListener("lmt:back-to-refine", handleBackToRefine);
     wrapper.addEventListener("lmt:open-edit", handleOpenEdit);
     wrapper.addEventListener("lmt:toggle-original", handleToggleOriginal);
     wrapper.addEventListener("lmt:export-jpeg", handleExport);
     wrapper.addEventListener("lmt:geometry-change", handleGeometryChange);
+    wrapper.addEventListener("lmt:settings-changed", handleSettingsChanged);
 
     return () => {
       if (mode === "refining" || mode === "editing")
@@ -1151,6 +1185,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       wrapper.removeEventListener("lmt:toggle-original", handleToggleOriginal);
       wrapper.removeEventListener("lmt:export-jpeg", handleExport);
       wrapper.removeEventListener("lmt:geometry-change", handleGeometryChange);
+      wrapper.removeEventListener("lmt:settings-changed", handleSettingsChanged);
     };
   });
 
@@ -1323,6 +1358,31 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
             </button>
           </div>
         {/if}
+        {#if ocrFailures.includes(i) && !translations[i]}
+          <div
+            class="absolute border-2 border-dashed border-rose-500/90 rounded-sm pointer-events-none z-30"
+            style:left="{box.x1 * liveScaleX}px"
+            style:top="{box.y1 * liveScaleY}px"
+            style:width="{(box.x2 - box.x1) * liveScaleX}px"
+            style:height="{(box.y2 - box.y1) * liveScaleY}px"
+          >
+            <button
+              type="button"
+              onclick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                void handleRetranslateBox(i, false);
+              }}
+              onmousedown={(e) => e.stopPropagation()}
+              onpointerdown={(e) => e.stopPropagation()}
+              disabled={isRetranslatingBox(i)}
+              title="The OCR engine could not read this bubble. Retry re-runs recognition on the same box."
+              class="pointer-events-auto absolute bottom-1 left-1/2 -translate-x-1/2 bg-rose-500/95 hover:bg-rose-400 disabled:opacity-60 text-white text-xs font-semibold px-2 py-0.5 rounded shadow whitespace-nowrap cursor-pointer transition-colors"
+            >
+              {isRetranslatingBox(i) ? "Retrying..." : "Retry OCR"}
+            </button>
+          </div>
+        {/if}
         {#if box.inpaintDeclined && (!box.gateSkip || translations[i])}
           <div
             class="absolute border-2 border-dotted border-rose-500/80 rounded-sm pointer-events-none z-30"
@@ -1355,6 +1415,8 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     <OverlayToolbar
       mode="results"
       {showOriginal}
+      {isStale}
+      onRetranslate={executeTranslation}
       onRefine={handleBackToRefine}
       onEditTranslations={openEditPanel}
       onExportJpg={saveJpg}

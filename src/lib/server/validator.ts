@@ -9,9 +9,10 @@
  * bubble.
  *
  * Every accepted result carries diagnostics. `untranslated` marks boxes whose
- * output echoes the source (exact match, or ≥50% source-script share when the
- * source and target scripts are disjoint), and `maskUntranslated()` turns
- * those slots into "" so the renderer leaves the original pixels alone.
+ * output cannot be a translation of the input: empty output for non-empty
+ * source, an exact echo, a wrong-language answer, or source-script
+ * contamination. `maskUntranslated()` turns those slots into "" so the
+ * renderer leaves the original pixels alone.
  */
 
 import {
@@ -636,7 +637,13 @@ function findUntranslated(
   for (let i = 0; i < translations.length; i++) {
     const source = sourceTexts[i] ?? "";
     const output = translations[i] ?? "";
-    if (!source.trim() || !output.trim()) continue;
+    // Nothing was asked for this box (no OCR text, or the gate held it back).
+    if (!source.trim()) continue;
+    if (!output.trim()) {
+      // Text went in and nothing came back: the model dropped this box.
+      flagged.push(i);
+      continue;
+    }
 
     const normalizedSource = normalizeForEcho(source);
     const normalizedOutput = normalizeForEcho(output);
@@ -652,8 +659,26 @@ function findUntranslated(
     const sourceClasses = sourceClassesFor(source, sourceLang);
     if (!sourceClasses) continue;
     if (sourceClasses.some((cls) => targetClasses.includes(cls))) continue;
+
+    // Wrong language: every dominant class is neither the target nor the
+    // source. Catches an English answer to a Korean page.
+    const dominant = dominantClasses(output);
+    if (
+      dominant?.length &&
+      dominant.every(
+        (cls) =>
+          !targetClasses.includes(cls) && !sourceClasses.includes(cls),
+      )
+    ) {
+      flagged.push(i);
+      continue;
+    }
+
+    // Contamination: one stranded kana in a Korean line is the reported
+    // `っ`. 0.15 is deliberately below "a whole word": the measured case
+    // "아! 뭐가 달라 っ!?" is 1 of 6 countable characters (0.167).
     if ([...normalizedOutput].length < 2) continue;
-    if (classShare(output, sourceClasses) >= 0.5) {
+    if (classShare(output, sourceClasses) >= 0.15) {
       flagged.push(i);
     }
   }

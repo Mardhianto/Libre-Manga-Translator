@@ -271,13 +271,22 @@ export function upsertHistoryEntry(
 
 /**
  * Persistence predicate (LMT-026): only a page whose boxes all translated is
- * allowed to write cache/history. A missing diagnostics object means the
- * response never went through the validator (empty OCR), which is not a
- * failure — treat it as clean.
+ * allowed to write cache/history.
+ *
+ * `ocrFailures` outranks the validator's opinion. A failed box reaches the
+ * model as `""`, the model happily returns a shorter page, and the validator
+ * calls it clean — which is how a page with six unread bubbles was cached as
+ * finished and could never be retried from the overlay.
+ *
+ * A missing diagnostics object means the response never went through the
+ * validator (empty OCR), which is not a failure by itself — treat it as clean
+ * unless the caller reports OCR failures.
  */
 export function isCleanResult(
   diagnostics?: { clean?: boolean; untranslated?: number[] } | null,
+  ocrFailures?: number[] | null,
 ): boolean {
+  if (ocrFailures?.length) return false;
   if (!diagnostics) return true;
   if (diagnostics.clean === true) return true;
   if (diagnostics.clean === false) return false;

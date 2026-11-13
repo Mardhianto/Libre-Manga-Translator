@@ -13,7 +13,12 @@ import {
   resolveNumCtx,
   resolveOutputCap,
   type BudgetVerdict,
-} from "./prompt-budget";import {
+} from "./prompt-budget";
+import {
+  keepBetterTranslation,
+  untranslatedCorrectionPrompt,
+} from "./correction";
+import {
   attachDiagnostics,
   clipRawResponse,
   isTranslationValidationError,
@@ -22,6 +27,7 @@ import {
   promptChars,
   validateTranslationResult,
   type LlmRunInfo,
+  type ValidatedTranslation,
 } from "./validator";
 
 export type { ServerConfig } from "./schemas";
@@ -501,12 +507,26 @@ export async function translateWithServer(
   });
 
   try {
-    return validateTranslationResult(response.data, ocrResults.length, {
+    const validated = validateTranslationResult(response.data, ocrResults.length, {
       sourceTexts: ocrResults,
       sourceLang,
       targetLang,
       run: mergeRunInfo(calls),
     });
+    return await correctUntranslated(
+      validated,
+      systemPrompt,
+      userPrompt,
+      schema,
+      config,
+      ocrResults,
+      sourceLang,
+      targetLang,
+      calls,
+      response.format,
+      maxTokens,
+      signal,
+    );
   } catch (error) {
     if (!isTranslationValidationError(error)) throw error;
 
@@ -530,6 +550,62 @@ export async function translateWithServer(
       targetLang,
       run: mergeRunInfo(calls),
     });
+  }
+}
+
+/**
+ * One correction round for boxes the validator refused (C3). The page parsed
+ * and every box has an entry, so this is not the format-failure path above:
+ * the model simply left some boxes empty, echoed, or in the wrong language.
+ *
+ * Never loops. A correction that flags more boxes is a regression and is
+ * discarded, and a failed correction round keeps the first answer: the page
+ * is already valid, so polish must not turn it into an error.
+ */
+async function correctUntranslated(
+  first: ValidatedTranslation,
+  systemPrompt: string,
+  userPrompt: string,
+  schema: object,
+  config: ServerConfig,
+  ocrResults: string[],
+  sourceLang: string,
+  targetLang: string,
+  calls: LlmRunInfo[],
+  startMode: ResponseFormatMode,
+  maxTokens: number,
+  signal?: AbortSignal,
+): Promise<ValidatedTranslation> {
+  const flagged = first.diagnostics.untranslated;
+  if (flagged.length === 0) return first;
+
+  try {
+    const response = await callServer(systemPrompt, userPrompt, config, {
+      schema,
+      schemaName: "manga_translation",
+      startMode,
+      correction: untranslatedCorrectionPrompt(flagged),
+      calls,
+      signal,
+      maxTokens,
+    });
+    const corrected = validateTranslationResult(
+      response.data,
+      ocrResults.length,
+      {
+        sourceTexts: ocrResults,
+        sourceLang,
+        targetLang,
+        run: mergeRunInfo(calls),
+      },
+    );
+    return keepBetterTranslation(first, corrected);
+  } catch (error) {
+    console.warn(
+      `[server] untranslated correction failed — keeping the first answer:`,
+      error,
+    );
+    return first;
   }
 }
 

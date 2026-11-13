@@ -15,6 +15,7 @@ import { DefaultConfig } from "../configs";
 import { env } from "../env";
 import type { OcrEngine, SingleOcrResult } from "./types";
 import type { GateReason } from "../gate";
+import { summarizeLineCounts } from "./accounting";
 
 export interface PaddleEngineOptions {
   id?: string;
@@ -238,6 +239,7 @@ export class PaddleOcrEngine implements OcrEngine {
       text: "",
       totalConf: 0,
       lineCount: 0,
+      droppedCount: 0,
     }));
 
     for (let start = 0; start < crops.length; start += batchSize) {
@@ -288,30 +290,38 @@ export class PaddleOcrEngine implements OcrEngine {
           const decoded = ctcDecode(slice, this.charset, C, langGroup);
           const textLen = decoded.text.trim().length;
 
-          if (decoded.confidence >= minConfidence) {
-            const isSingleCharNoise =
-              textLen === 1 && decoded.confidence < Math.max(minConfidence, 0.75);
+          const slot = batchData[i].slotIndex;
+          const target = stitchedResults[slot];
+          if (!target) {
+            throw new Error(
+              `[paddle] crop ${i} claims slot ${slot}, outside 0..${stitchedResults.length - 1}`,
+            );
+          }
 
-            if (!isSingleCharNoise && textLen > 0) {
-              const slot = batchData[i].slotIndex;
-              const target = stitchedResults[slot];
-              if (!target) {
-                throw new Error(
-                  `[paddle] crop ${i} claims slot ${slot}, outside 0..${stitchedResults.length - 1}`,
-                );
-              }
+          const isSingleCharNoise =
+            textLen === 1 && decoded.confidence < Math.max(minConfidence, 0.75);
+          const accepted =
+            decoded.confidence >= minConfidence &&
+            textLen > 0 &&
+            !isSingleCharNoise;
 
-              const newText = decoded.text.trim();
+          if (accepted) {
+            const newText = decoded.text.trim();
 
-              if (target.text.endsWith("-")) {
-                target.text = target.text.slice(0, -1) + newText;
-              } else {
-                target.text += (target.text ? " " : "") + newText;
-              }
-
-              target.totalConf += decoded.confidence;
-              target.lineCount += 1;
+            if (target.text.endsWith("-")) {
+              target.text = target.text.slice(0, -1) + newText;
+            } else {
+              target.text += (target.text ? " " : "") + newText;
             }
+
+            target.totalConf += decoded.confidence;
+            target.lineCount += 1;
+          } else if (textLen > 0) {
+            // A line crop produced text the model itself did not believe.
+            // Counting it is the difference between "this bubble is empty"
+            // and "this bubble lost a clause", which the report could not
+            // tell apart.
+            target.droppedCount += 1;
           }
         }
       } finally {
@@ -320,14 +330,18 @@ export class PaddleOcrEngine implements OcrEngine {
       }
     }
 
-    return stitchedResults.map(({ text, totalConf, lineCount }) => {
-      if (lineCount === 0) {
-        return { text: "", confidence: 0, failed: true };
-      }
-      return {
-        text: text.trim(),
-        confidence: lineCount > 0 ? totalConf / lineCount : 0,
-      };
-    });
+    return stitchedResults.map(
+      ({ text, totalConf, lineCount, droppedCount }) => {
+        const accounting = summarizeLineCounts(lineCount, droppedCount);
+        if (accounting.failed) {
+          return { text: "", confidence: 0, ...accounting };
+        }
+        return {
+          text: text.trim(),
+          confidence: totalConf / lineCount,
+          ...accounting,
+        };
+      },
+    );
   }
 }

@@ -13,13 +13,14 @@ import {
   majorityLabel,
   decideSkip,
   gateModeFor,
+  UNSUPPORTED_GROUP,
   type GateMode,
   type GateSummary,
   type RegionVerdict,
 } from "../gate";
 import { judgeRegion, loadGate } from "../gate/osd";
 import type { GateReason } from "../gate";
-import { isTrustedLabel } from "../gate/charset";
+import { isCjkLabel, isTrustedLabel } from "../gate/charset";
 import type { OCRResult, OcrEngine, OcrOutcome } from "./types";
 import { PaddleOcrEngine } from "./paddle";
 import { MangaOcrEngine } from "./manga-ocr";
@@ -31,6 +32,12 @@ export type { OCRResult, OcrOutcome };
 const paddleEngine = new PaddleOcrEngine();
 const mangaOcrEngine = new MangaOcrEngine();
 const pororoEngine = new PororoOcrEngine();
+/**
+ * Pack to read an unidentified CJK-capable page with. The Chinese pack is the
+ * only shipped one whose dictionary covers Japanese kana plus Han, and it is
+ * what `sourceLang: "Japanese"` resolves to anyway (`configs.ts`).
+ */
+const CJK_FALLBACK_GROUP = resolveLangGroup("Japanese").group;
 // PP-OCRv6 small rec, manga fine-tune (Japanese-only): same CTC contract as
 // PaddleOCR (48px height, stock ppocrv6 dict + space + blank), fixed file +
 // bundled dict, so it reuses the Paddle runner.
@@ -57,6 +64,21 @@ export async function releaseOcrEngines(): Promise<void> {
     pororoEngine.release?.(),
     ppocrv6MangaEngine.release?.(),
   ].filter(Boolean));
+}
+
+/**
+ * Auto-Detect only: is this verdict weak enough to ask the pixels a second
+ * time?
+ *
+ * A trusted label (Latin, Hangul, Cyrillic, …) is a real answer — an English
+ * page must not be rotated into nonsense. An untrusted label (Khmer, Tibetan,
+ * Syriac, …) or no label at all is exactly the measured failure on vertical
+ * Japanese, where the fix is to read the same crop rotated.
+ */
+function needsSecondOpinion(verdict: RegionVerdict | null): boolean {
+  if (!verdict || !verdict.script) return true;
+  if (verdict.decision === "uncertain") return true;
+  return !isTrustedLabel(verdict.script) && !isCjkLabel(verdict.script);
 }
 
 /**
@@ -88,8 +110,17 @@ export async function textRecognise(
     // Crop + slice once; the gate and the recognizer read the same lines.
     // Fix: give the 64px line reader wider margins and stickier merges.
     const isPororo = engineId === "pororo";
-    const regionLines: ImageData[][] = bboxes.map((bbox) => {
-      const rawCrop = cropBubbleFromImage(bitmap, bbox, sourceLang, engineId);
+    const buildRegionLines = (
+      bbox: Bbox,
+      forceOrientation?: "vertical" | "horizontal",
+    ): ImageData[] => {
+      const rawCrop = cropBubbleFromImage(
+        bitmap,
+        bbox,
+        sourceLang,
+        engineId,
+        forceOrientation,
+      );
       const normalizedCrop = normalizePolarity(rawCrop);
       const boostedCrop = boostContrast(normalizedCrop);
       const bubbleH = bbox.y2 - bbox.y1;
@@ -106,7 +137,11 @@ export async function textRecognise(
           })
         : sliceImageDataIntoLines(boostedCrop);
       return lines.map((line) => padImageForOCR(line, pad));
-    });
+    };
+
+    const regionLines: ImageData[][] = bboxes.map((bbox) =>
+      buildRegionLines(bbox),
+    );
 
     // --- script-ID pass ---
     let gateLoaded = false;
@@ -115,6 +150,21 @@ export async function textRecognise(
     if (mode !== "off" && gateLoaded) {
       for (let i = 0; i < bboxes.length; i++) {
         verdicts[i] = await judgeRegion(regionLines[i]);
+      }
+    }
+
+    // Second opinion: a verdict LMT cannot read never decides the pack on its
+    // own when the same crop reads as CJK after rotation. This is the direct
+    // fix for a vertical Japanese page reported as "Khmer".
+    if (mode === "auto" && gateLoaded) {
+      for (let i = 0; i < bboxes.length; i++) {
+        if (!needsSecondOpinion(verdicts[i])) continue;
+        const alternate = buildRegionLines(bboxes[i], "vertical");
+        const altVerdict = await judgeRegion(alternate);
+        if (!altVerdict || !isCjkLabel(altVerdict.script)) continue;
+        if (altVerdict.weight <= (verdicts[i]?.weight ?? 0)) continue;
+        verdicts[i] = altVerdict;
+        regionLines[i] = alternate;
       }
     }
 
@@ -136,10 +186,26 @@ export async function textRecognise(
         }
       }
     }
-    const gateGroup = mode === "auto" && gateLoaded ? groupForLabel(pageLabel) : null;
-    if (gateGroup) {
+
+    const gateGroup =
+      mode === "auto" && gateLoaded && pageLabel
+        ? groupForLabel(pageLabel)
+        : null;
+
+    if (gateGroup && gateGroup !== UNSUPPORTED_GROUP) {
       langGroup = gateGroup;
       groupSource = "gate";
+    } else if (pageLabel) {
+      // The identifier named a script LMT cannot read (Khmer, Lao, Tibetan, …).
+      // Resolving `latin` here would be a fabricated answer — precisely how a
+      // vertical Japanese page ended up in the Latin recognizer. Read it with
+      // the only pack whose dictionary covers kana + Han, and record that this
+      // was a documented fallback rather than a detection.
+      langGroup = CJK_FALLBACK_GROUP;
+      groupSource = "unresolved";
+      console.warn(
+        `[ocr] auto-detect named "${pageLabel}" (no rec pack) — reading with languages/${langGroup}/rec.onnx`,
+      );
     } else {
       const resolved = resolveLangGroup(sourceLang);
       langGroup = resolved.group;
@@ -186,6 +252,9 @@ export async function textRecognise(
       text: r.text,
       confidence: r.confidence,
       failed: r.failed,
+      keptLines: r.keptLines,
+      droppedLines: r.droppedLines,
+      partial: r.partial,
       gateSkip: gateSkip[i],
     }));
 

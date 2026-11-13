@@ -26,6 +26,7 @@ import { onDestroy } from "svelte";
   import DebugPanel from "./settings/DebugPanel.svelte";
   import InpaintSettings from "./settings/InpaintSettings.svelte";
   import ModelStorageSettings from "./settings/ModelStorageSettings.svelte";
+  import PageCacheSettings from "./settings/PageCacheSettings.svelte";
   import ModelUpdateChecker from "./settings/ModelUpdateChecker.svelte";
   import GpuAccelerationPanel from "./settings/GpuAccelerationPanel.svelte";
   import { getSiteRule } from "@/lib/adapters";
@@ -720,6 +721,8 @@ import { onDestroy } from "svelte";
             <ModelUpdateChecker />
 
             <ModelStorageSettings />
+
+            <PageCacheSettings />
 
             <!-- Site Rules -->
             <div class="panel-card !p-2.5 flex flex-col gap-2">

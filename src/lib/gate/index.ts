@@ -7,6 +7,7 @@ import {
   isCjkSource,
   isAbstentionLabel,
   isTrustedLabel,
+  isUnsupportedLabel,
   japaneseCharCount,
   LANGGROUP_BY_LABEL,
   type ScriptClass,
@@ -65,11 +66,14 @@ export interface GateSummary {
   label?: string;
   /**
    * How `group` was chosen:
-   *  - "gate"     OSD named a script (majority, or best label when there was none);
-   *  - "explicit" the user picked a source language;
-   *  - "fallback" nothing identified the page, so `latin` was assumed.
+   *  - "gate"       OSD named a script (majority, or best label when there was none);
+   *  - "explicit"   the user picked a source language;
+   *  - "fallback"   nothing identified the page, so `latin` was assumed;
+   *  - "unresolved" OSD named a script LMT has no pack for, so the caller
+   *                 documented its own fallback instead of pretending `latin`
+   *                 was an identification.
    */
-  groupSource?: "gate" | "explicit" | "fallback";
+  groupSource?: "gate" | "explicit" | "fallback" | "unresolved";
 }
 
 export function gateModeFor(
@@ -229,6 +233,10 @@ function decideSkipAuto(
   pageLabel: string | null,
 ): GateReason | null {
   if (!pageLabel || !verdict || verdict.decision === "uncertain") return null;
+  // A label LMT cannot read is not entitled to arbitrate the page. Letting
+  // "Khmer" stand as the page majority is how a Japanese page's own kana was
+  // outvoted in the vertical-JA report.
+  if (!isTrustedLabel(pageLabel) && !isCjkLabel(pageLabel)) return null;
   const sameSide =
     isCjkLabel(pageLabel) === isCjkLabel(verdict.script) ||
     baseLabel(pageLabel) === baseLabel(verdict.script);
@@ -265,8 +273,19 @@ export function decideSkip(
   return null;
 }
 
+/**
+ * Sentinel for "the identifier named a script LMT cannot read". Distinct from
+ * `null`, which means the identifier said nothing at all.
+ */
+export const UNSUPPORTED_GROUP = "unsupported" as const;
+
 /** Language group for OCR model selection under Auto-Detect. */
-export const groupForLabel = (label: string | null): string | null =>
-  label ? LANGGROUP_BY_LABEL[label] ?? null : null;
+export const groupForLabel = (label: string | null): string | null => {
+  if (!label) return null;
+  const base = baseLabel(label);
+  const mapped = LANGGROUP_BY_LABEL[base];
+  if (mapped) return mapped;
+  return isUnsupportedLabel(base) ? UNSUPPORTED_GROUP : null;
+};
 
 export type { ScriptClass };

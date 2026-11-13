@@ -225,4 +225,10 @@ describe("isCleanResult", () => {
     expect(isCleanResult(undefined)).toBe(true);
     expect(isCleanResult(null)).toBe(true);
   });
+
+  it("rejects results with OCR failures even when diagnostics look clean", () => {
+    expect(isCleanResult({ clean: true, untranslated: [] }, [0])).toBe(false);
+    expect(isCleanResult(undefined, [2])).toBe(false);
+    expect(isCleanResult(null, [1, 3])).toBe(false);
+  });
 });

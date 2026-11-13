@@ -4,6 +4,12 @@ export interface OCRResult {
   text: string;
   confidence: number;
   failed?: boolean;
+  /** Lines the recognizer accepted for this box. */
+  keptLines?: number;
+  /** Lines sliced for this box that the recognizer rejected. */
+  droppedLines?: number;
+  /** Some lines survived but at least half were dropped: content is missing. */
+  partial?: boolean;
   /** the script gate held this region back: text was NOT translated */
   gateSkip?: GateReason | null;
 }
@@ -17,6 +23,12 @@ export interface SingleOcrResult {
   text: string;
   confidence: number;
   failed?: boolean;
+  /** Lines the recognizer accepted for this box. */
+  keptLines?: number;
+  /** Lines sliced for this box that the recognizer rejected. */
+  droppedLines?: number;
+  /** Some lines survived but at least half were dropped: content is missing. */
+  partial?: boolean;
 }
 
 export interface OcrEngine {

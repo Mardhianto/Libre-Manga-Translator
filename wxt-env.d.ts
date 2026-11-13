@@ -54,11 +54,23 @@ interface SeriesContext {
   translatedCount: number;
 }
 
+interface PageCacheFingerprint {
+  sourceLang: string;
+  targetLang: string;
+  ocrEngine: string;
+  ocrMinConfidence: number;
+  detectionModel: string;
+  llmModel: string;
+  temperature: number;
+  promptVersion: number;
+}
+
 interface PageCache {
   bboxes: Bbox[];
   translations: Translations;
   sourceTexts?: string[];
   cleanedSrc?: string;
+  fingerprint?: PageCacheFingerprint;
 }
 
 interface TranslationDiagnostics {
@@ -121,6 +133,11 @@ interface DebugEntry {
   sourceTexts?: string[];
   translations?: string[];
   untranslated?: number[];
+  /**
+   * Box indices the recognizer failed or half-read. The model never saw their
+   * text, so they are not `untranslated` — they are missing input.
+   */
+  ocrFailures?: number[];
   /** Model answer before parsing (first 4 KB) — see `TranslationDiagnostics`. */
   rawResponse?: string;
   /** LLM requests spent on this page. */

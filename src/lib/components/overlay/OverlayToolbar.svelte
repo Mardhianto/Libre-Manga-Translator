@@ -16,6 +16,7 @@
     PenLine,
     Download,
     Image,
+    RefreshCw,
   } from "lucide-svelte";
 
   interface Props {
@@ -43,6 +44,8 @@
     onEditTranslations?: () => void;
     onExportJpg?: () => void;
     onToggleOriginal?: () => void;
+    isStale?: boolean;
+    onRetranslate?: () => void;
   }
 
   let {
@@ -70,6 +73,8 @@
     onEditTranslations,
     onExportJpg,
     onToggleOriginal,
+    isStale = false,
+    onRetranslate,
   }: Props = $props();
 
   function getInitialResultsOffset(): { x: number; y: number } {
@@ -320,6 +325,18 @@
       >
         <GripHorizontal size={14} />
       </button>
+
+      <!-- Re-translate Page -->
+      {#if onRetranslate}
+        <button
+          type="button"
+          onclick={trapClick(onRetranslate)}
+          title={isStale ? "Settings changed — Click to re-translate page" : "Re-translate page"}
+          class="w-8 h-8 inline-flex items-center justify-center rounded-[4px] p-0 shrink-0 {isStale ? 'text-[var(--accent-amber)] animate-pulse' : 'text-[var(--text-muted)]'} hover:text-[var(--accent-cyan)] hover:bg-[var(--surface-panel)] transition-colors cursor-pointer border border-transparent hover:border-[var(--border-line)]"
+        >
+          <RefreshCw size={16} />
+        </button>
+      {/if}
 
       <!-- Refine Boxes -->
       <button

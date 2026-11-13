@@ -209,6 +209,7 @@ export function normalizePolarity(imageData: ImageData): ImageData {
   return imageData;
 }
 
+/** Languages whose manga lettering is conventionally set in vertical columns. */
 const VERTICAL_LANGUAGES = [
   "Japanese",
   "Chinese (Simplified)",
@@ -216,33 +217,82 @@ const VERTICAL_LANGUAGES = [
   "Auto-Detect",
 ];
 
-function detectVerticalColumns(
-  bitmap: ImageBitmap,
-  x: number,
-  y: number,
+/** Reading direction of a single bubble crop. */
+export type CropOrientation = "vertical" | "horizontal" | "ambiguous";
+
+/**
+ * What the ink projection says about a crop's reading direction.
+ *
+ * Vertical Japanese sets glyphs down a narrow column: per-column ink counts
+ * alternate high/low (a pulse) while per-row counts stay dense, because every
+ * column spans the bubble's full height. Horizontal lettering is the same
+ * picture rotated, so the two profiles swap roles.
+ */
+export interface OrientationEvidence {
+  /** Variance of the per-column ink count, normalised to [0, 0.25]. */
+  columnVariance: number;
+  /** Variance of the per-row ink count, normalised to [0, 0.25]. */
+  rowVariance: number;
+  /** Contiguous ink bands across x - one per vertical text column. */
+  columnBands: number;
+  /** Contiguous ink bands down y - one per horizontal text line. */
+  rowBands: number;
+}
+
+/** Edge-sampled background guess, matching `normalizePolarity`'s polarity. */
+function perimeterIsDark(
+  data: Uint8ClampedArray,
   w: number,
   h: number,
 ): boolean {
-  if (w < 20 || h < 20) return false;
-  const canvas = new OffscreenCanvas(w, h);
-  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
-  ctx.drawImage(bitmap, x, y, w, h, 0, 0, w, h);
-  const data = ctx.getImageData(0, 0, w, h).data;
-
-  // Sample perimeter to guess background luminance
-  let edgeSum = 0;
-  let edgeCount = 0;
+  let sum = 0;
+  let count = 0;
   for (let c = 0; c < w; c++) {
-    const topIdx = c * 4;
-    const botIdx = ((h - 1) * w + c) * 4;
-    edgeSum +=
-      0.299 * data[topIdx] + 0.587 * data[topIdx + 1] + 0.114 * data[topIdx + 2];
-    edgeSum +=
-      0.299 * data[botIdx] + 0.587 * data[botIdx + 1] + 0.114 * data[botIdx + 2];
-    edgeCount += 2;
+    const top = c * 4;
+    const bottom = ((h - 1) * w + c) * 4;
+    sum +=
+      0.299 * data[top] +
+      0.587 * data[top + 1] +
+      0.114 * data[top + 2] +
+      0.299 * data[bottom] +
+      0.587 * data[bottom + 1] +
+      0.114 * data[bottom + 2];
+    count += 2;
   }
-  const isDarkBg = edgeSum / (edgeCount || 1) < 128;
+  return sum / (count || 1) < 128;
+}
 
+function profileVariance(arr: Float32Array): number {
+  if (arr.length === 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < arr.length; i++) sum += arr[i];
+  const mean = sum / arr.length;
+  let v = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const d = arr[i] - mean;
+    v += d * d;
+  }
+  return v / arr.length;
+}
+
+/** Count contiguous ink bands (runs of profile values above `threshold`). */
+function inkBands(sums: Float32Array, threshold: number): number {
+  let bands = 0;
+  let inBand = false;
+  for (let i = 0; i < sums.length; i++) {
+    if (sums[i] > threshold) {
+      if (!inBand) bands++;
+      inBand = true;
+    } else {
+      inBand = false;
+    }
+  }
+  return bands;
+}
+
+export function measureOrientation(img: ImageData): OrientationEvidence {
+  const { width: w, height: h, data } = img;
+  const isDarkBg = perimeterIsDark(data, w, h);
   const colSums = new Float32Array(w);
   const rowSums = new Float32Array(h);
   for (let r = 0; r < h; r++) {
@@ -257,23 +307,70 @@ function detectVerticalColumns(
       }
     }
   }
-
-  const colVar = getProfileVariance(colSums) / (h * h || 1);
-  const rowVar = getProfileVariance(rowSums) / (w * w || 1);
-  return colVar > rowVar * 1.15;
+  return {
+    columnVariance: profileVariance(colSums) / (h * h || 1),
+    rowVariance: profileVariance(rowSums) / (w * w || 1),
+    columnBands: inkBands(colSums, h * 0.02),
+    rowBands: inkBands(rowSums, w * 0.02),
+  };
 }
 
-function getProfileVariance(arr: Float32Array): number {
-  if (arr.length === 0) return 0;
-  let sum = 0;
-  for (let i = 0; i < arr.length; i++) sum += arr[i];
-  const mean = sum / arr.length;
-  let v = 0;
-  for (let i = 0; i < arr.length; i++) {
-    const d = arr[i] - mean;
-    v += d * d;
-  }
-  return v / arr.length;
+/**
+ * Does this crop hold vertical (rotated) lettering?
+ *
+ * Two independent witnesses are scored: the projection pulse (column vs row
+ * variance) and the band structure (several vertical columns vs several
+ * horizontal lines). Bands carry double weight because they survive furigana,
+ * screentone and bubble tails, which inflate the variance signal on short
+ * crops.
+ *
+ * `ambiguous` is a real answer: it hands the decision back to the caller's
+ * aspect-ratio rule instead of guessing.
+ */
+export function classifyOrientation(img: ImageData): CropOrientation {
+  if (img.width < 20 || img.height < 20) return "horizontal";
+  const e = measureOrientation(img);
+  const pulse =
+    e.columnVariance > e.rowVariance * 1.2
+      ? 1
+      : e.columnVariance < e.rowVariance * 0.8
+        ? -1
+        : 0;
+  const bands =
+    e.columnBands > e.rowBands ? 1 : e.columnBands < e.rowBands ? -1 : 0;
+  const score = pulse + 2 * bands;
+  if (score >= 2) return "vertical";
+  if (score <= -2) return "horizontal";
+  return "ambiguous";
+}
+
+/**
+ * Rotation policy, separated from the measurement so it can be pinned.
+ * A confident reading decides alone; only `ambiguous` falls back to the
+ * pre-existing "tall crop" rule.
+ */
+export function shouldRotateForOrientation(
+  orientation: CropOrientation,
+  aspect: number,
+): boolean {
+  if (orientation === "vertical") return true;
+  if (orientation === "horizontal") return false;
+  return aspect >= 0.8;
+}
+
+/** Rasterise one bbox so the pure classifier can read it. */
+function classifyBubbleOrientation(
+  bitmap: ImageBitmap,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): CropOrientation {
+  if (w < 20 || h < 20) return "horizontal";
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  ctx.drawImage(bitmap, x, y, w, h, 0, 0, w, h);
+  return classifyOrientation(ctx.getImageData(0, 0, w, h));
 }
 
 export function cropBubbleFromImage(
@@ -281,6 +378,11 @@ export function cropBubbleFromImage(
   bbox: Bbox,
   sourceLanguage: string,
   engineId?: string,
+  /**
+   * Skip the measurement and use this reading direction. Auto-Detect uses it
+   * for a second opinion when the first pass named a script LMT cannot read.
+   */
+  forceOrientation?: "vertical" | "horizontal",
 ) {
   const x1 = Math.max(0, Math.min(bitmap.width - 1, Math.round(bbox.x1)));
   const y1 = Math.max(0, Math.min(bitmap.height - 1, Math.round(bbox.y1)));
@@ -296,10 +398,14 @@ export function cropBubbleFromImage(
 
   let shouldRotate = false;
   if (isVerticalLanguage) {
-    // Only rotate if column variance confirms vertical layout; do not blindly rotate tall horizontal bubbles
-    if (h / w >= 0.8) {
-      shouldRotate = detectVerticalColumns(bitmap, x1, y1, w, h);
-    }
+    // Do NOT gate on aspect alone. A wide bubble holding three vertical
+    // columns fails `h/w >= 0.8` and is then sliced ACROSS its columns, which
+    // is the scrambled output in the bug report. The ink profile answers the
+    // question directly; only an ambiguous reading falls back to the old
+    // conservative aspect rule.
+    const orientation =
+      forceOrientation ?? classifyBubbleOrientation(bitmap, x1, y1, w, h);
+    shouldRotate = shouldRotateForOrientation(orientation, h / w);
   }
 
   const outW = shouldRotate ? h : w;

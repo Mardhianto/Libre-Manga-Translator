@@ -32,6 +32,11 @@ import {
   syncContextKey,
   updateSeriesContext,
 } from "@/lib/series-context-store";
+import {
+  buildFingerprint,
+  readCurrentFingerprint,
+  isCacheValid,
+} from "@/lib/cache/page-cache";
 import "@/assets/app.css";
 
 const srcKey = (src: string) =>
@@ -184,6 +189,33 @@ export default defineContentScript({
       { ui: ShadowRootContentScriptUi<any>; wrapper: HTMLElement }
     >();
     let lastDetectMs: number | undefined = undefined;
+
+    const WATCHED_SETTINGS = [
+      "sync:source-lang",
+      "sync:target-lang",
+      "sync:ocr-engine",
+      "sync:ocr-min-confidence",
+      "sync:llm-model",
+      "sync:llm-temperature",
+      "sync:detection-model",
+      "local:server-model",
+      "sync:gemini-model",
+      "sync:current-mode",
+    ] as const;
+
+    const unwatchFns = WATCHED_SETTINGS.map((key) =>
+      storage.watch(key, () => {
+        for (const [src, overlay] of overlays) {
+          Registry.markIdle(src);
+          overlay.wrapper.dispatchEvent(new CustomEvent("lmt:settings-changed"));
+        }
+      }),
+    );
+    ctx.onInvalidated(() => {
+      for (const unwatch of unwatchFns) {
+        unwatch();
+      }
+    });
 
     // Mount independent sidebar shadow UI
     createShadowRootUi(ctx, {
@@ -363,10 +395,11 @@ export default defineContentScript({
                 rawImageUrl: src,
 
                 getTranslationCache: async () => {
+                  const currentFp = await readCurrentFingerprint();
                   const cache = await storage.getItem<PageCache>(
                     `local:${await translationKey()}`,
                   );
-                  if (!cache) return;
+                  if (!isCacheValid(cache, currentFp)) return;
                   const translatedSrc = await repaintWithTranslations(
                     src,
                     cache.bboxes,
@@ -431,6 +464,7 @@ export default defineContentScript({
                     "sync:target-lang",
                     "local:active-device",
                     "sync:ocr-min-confidence",
+                    "sync:ocr-engine",
                     "sync:detection-min-confidence",
                     "sync:llm-temperature",
                     "local:server-schema",
@@ -605,6 +639,10 @@ export default defineContentScript({
 
                   const { translations, context, sourceTexts, gateSkip, gate, diagnostics } =
                     resp;
+                  // Boxes the recognizer failed or half-read. Hoisted above the
+                  // debug entry because the entry reports them, and above the
+                  // cache write because they outrank the validator's verdict.
+                  const ocrFailures: number[] = resp.ocrFailures ?? [];
                   // Echoed boxes keep the original pixels: masking them to ""
                   // means the renderer neither inpaints nor paints them.
                   const visibleTranslations = maskUntranslated(
@@ -658,6 +696,9 @@ export default defineContentScript({
                       sourceTexts,
                       translations,
                       untranslated: diagnostics?.untranslated,
+                      // Boxes the recognizer failed or half-read. Distinct
+                      // from `untranslated`: the model never saw the text.
+                      ocrFailures,
                       ...runDiagnosticFields(diagnostics),
                     timing,
                     ocrMinConfidence: debugCtx.ocrMinConfidence,
@@ -687,7 +728,10 @@ export default defineContentScript({
                   // context. A padded/echoed page keeps its debug entry (that
                   // is the whole point of the log) but must not poison the
                   // next prompt or resurrect echoed lines from cache.
-                  if (isCleanResult(diagnostics)) {
+                  // OCR failures outrank the validator: a box the recognizer
+                  // could not read reaches the model as "", which the
+                  // validator has no way to call dirty.
+                  if (isCleanResult(diagnostics, ocrFailures)) {
                     const cacheKey = await translationKey();
                     storage
                       .setItem<PageCache>(`local:${cacheKey}`, {
@@ -696,6 +740,7 @@ export default defineContentScript({
                         // resurrect an echoed source line.
                         translations: visibleTranslations,
                         sourceTexts,
+                        fingerprint: buildFingerprint({ ...cfg, ...runtime }),
                       })
                       .catch((err) => console.warn("LMT: page-cache persist failed:", err));
 
@@ -710,14 +755,14 @@ export default defineContentScript({
                     ).catch((err) => console.warn("LMT: series-context update failed:", err));
                   } else {
                     console.warn(
-                      `LMT: ${diagnostics?.untranslated?.length ?? 0} untranslated box(es) on ${
-                        seriesName ? `"${seriesName}" ` : ""
-                      }page ${resolvedPage}; cache/context not saved.`,
+                      `LMT: ${diagnostics?.untranslated?.length ?? 0} untranslated box(es)` +
+                        `${ocrFailures.length ? `, ${ocrFailures.length} OCR failure(s)` : ""}` +
+                        ` on ${seriesName ? `"${seriesName}" ` : ""}page ${resolvedPage}; cache/context not saved.`,
                     );
                   }
                   }
 
-                  return { translations: visibleTranslations, sourceTexts, context, gateSkip, gate, diagnostics };
+                  return { translations: visibleTranslations, sourceTexts, context, gateSkip, gate, diagnostics, ocrFailures };
                 },
 
                 // Re-render translations on top of the (cached) inpainted base.
@@ -847,6 +892,8 @@ export default defineContentScript({
                         translations,
                         bboxes,
                         cleanedSrc: cached?.url,
+                        fingerprint:
+                          cache.fingerprint ?? (await readCurrentFingerprint()),
                       },
                     );
                   }

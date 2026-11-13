@@ -213,6 +213,36 @@ const TRUSTED = new Set([
  * counted as a vote against one (is_abstention). */
 const ABSTENTION = new Set(["Common", "Joined", "NULL", "Broken"]);
 
+/**
+ * OSD labels LMT has no recognition pack for.
+ *
+ * This is NOT the same answer as "no evidence". The identifier read a script;
+ * we simply cannot recognize it. Resolving `latin` (or any other pack) in this
+ * case fabricates an answer, which is how a vertical Japanese page ended up
+ * being read by the Latin recognizer. Callers must treat these as
+ * `groupSource: "unresolved"` and pick a documented fallback.
+ */
+const UNSUPPORTED = new Set([
+  "Khmer",
+  "Lao",
+  "Myanmar",
+  "Tibetan",
+  "Syriac",
+  "Thaana",
+  "Ethiopic",
+  "Georgian",
+  "Armenian",
+  "Bengali",
+  "Gujarati",
+  "Gurmukhi",
+  "Kannada",
+  "Malayalam",
+  "Oriya",
+  "Sinhala",
+  "Canadian_Aboriginal",
+  "Cherokee",
+]);
+
 export const baseLabel = (label: string): string =>
   label.endsWith("-dn") ? label.slice(0, -3) : label;
 
@@ -222,6 +252,8 @@ export const isTrustedLabel = (label: string): boolean =>
   TRUSTED.has(baseLabel(label));
 export const isAbstentionLabel = (label: string): boolean =>
   ABSTENTION.has(baseLabel(label));
+export const isUnsupportedLabel = (label: string): boolean =>
+  UNSUPPORTED.has(baseLabel(label));
 
 /** OSD label -> LMT rec language group (keys of `ocrLangGroupMap`; Japanese
  * and Han groups both use "chinese", the existing precedent in configs.ts). */

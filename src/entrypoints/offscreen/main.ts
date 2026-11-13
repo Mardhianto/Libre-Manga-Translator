@@ -73,6 +73,22 @@ function errorResponse(err: unknown) {
 }
 
 /**
+ * Boxes whose recognition failed or lost half their lines. Gate-skipped boxes
+ * are excluded on purpose: they were held back deliberately, not failed.
+ *
+ * The content script needs this because `""` in `sourceTexts` is otherwise
+ * indistinguishable from a legitimately empty bubble, and that ambiguity is
+ * exactly why a broken page could be cached as a finished one.
+ */
+function ocrFailureIndexes(
+  results: { failed?: boolean; partial?: boolean; gateSkip?: unknown }[],
+): number[] {
+  return results
+    .map((r, i) => (!r.gateSkip && (r.failed || r.partial) ? i : -1))
+    .filter((i) => i >= 0);
+}
+
+/**
  * Per-job execution deadline, owned by the context that actually runs the
  * request (LMT-010).
  *
@@ -343,6 +359,7 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
           ...res,
           sourceTexts: ocrResults.map((r) => r.text),
           gateSkip: ocrResults.map((r) => r.gateSkip ?? null),
+          ocrFailures: ocrFailureIndexes(ocrResults),
           gate: ocrOut.gate,
           timing: { ocr, translate: performance.now() - tTrans },
           backend,
@@ -381,6 +398,7 @@ browser.runtime.onMessage.addListener((msg, _, sendResponse) => {
           ...res,
           sourceTexts: ocrResults.map((r) => r.text),
           gateSkip: ocrResults.map((r) => r.gateSkip ?? null),
+          ocrFailures: ocrFailureIndexes(ocrResults),
           gate: ocrOut.gate,
           timing: { ocr, translate: performance.now() - tTrans },
         };

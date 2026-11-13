@@ -240,6 +240,68 @@ describe("validateTranslationResult", () => {
     expect(result.diagnostics.untranslated).toEqual([]);
   });
 
+  it("flags a stranded source-script character in the target text", () => {
+    // The reported `っ` leak: one kana in an otherwise Korean line.
+    const result = validateTranslationResult(
+      { translations: ["아! 뭐가 달라 っ!?"] },
+      1,
+      {
+        sourceTexts: ["あ！ 何か違う っ！？"],
+        sourceLang: "Japanese",
+        targetLang: "Korean",
+      },
+    );
+    expect(result.diagnostics.untranslated).toEqual([0]);
+  });
+
+  it("flags an answer written in a third language", () => {
+    const result = validateTranslationResult(
+      { translations: ["Sure, here is the translation."] },
+      1,
+      {
+        sourceTexts: ["こんにちは"],
+        sourceLang: "Japanese",
+        targetLang: "Korean",
+      },
+    );
+    expect(result.diagnostics.untranslated).toEqual([0]);
+  });
+
+  it("flags an empty output for a box that had text", () => {
+    const result = validateTranslationResult(
+      { translations: [""] },
+      1,
+      {
+        sourceTexts: ["強大な覇気が2つ"],
+        sourceLang: "Japanese",
+        targetLang: "Korean",
+      },
+    );
+    expect(result.diagnostics.untranslated).toEqual([0]);
+  });
+
+  it("does not flag an empty source box", () => {
+    const result = validateTranslationResult({ translations: [""] }, 1, {
+      sourceTexts: [""],
+      sourceLang: "Japanese",
+      targetLang: "Korean",
+    });
+    expect(result.diagnostics.untranslated).toEqual([]);
+  });
+
+  it("does not flag a Korean line that keeps a Latin proper noun", () => {
+    const result = validateTranslationResult(
+      { translations: ["루피(Luffy)가 혼자 도망쳤다니 말도 안 돼"] },
+      1,
+      {
+        sourceTexts: ["ルフィが一人で逃げたなんてありえないし"],
+        sourceLang: "Japanese",
+        targetLang: "Korean",
+      },
+    );
+    expect(result.diagnostics.untranslated).toEqual([]);
+  });
+
   it("ignores echo checks when source texts do not line up", () => {
     const result = validateTranslationResult(
       { translations: ["こんにちは"] },
