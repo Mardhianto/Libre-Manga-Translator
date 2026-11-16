@@ -179,6 +179,47 @@ export function syncWrapperGeometry(
   return true;
 }
 
+/**
+ * Find the page's live copy of the source we are overlaying.
+ *
+ * The fast path is a CSS attribute selector, but only for short, plain URLs:
+ * a `data:` source is enormous and a `canvas:`/`blob:` source names no element
+ * at all, so building `img[src="…"]` for them either throws or matches nothing
+ * (LMT-034). Those fall back to comparing `src` directly.
+ */
+function findLiveSourceElement(
+  originalSrc: string,
+  wrapper: HTMLElement,
+): HTMLImageElement | null {
+  const selectorSafe =
+    /^https?:\/\//i.test(originalSrc) &&
+    originalSrc.length < 2048 &&
+    !/["\\]/.test(originalSrc);
+
+  const candidates: HTMLImageElement[] = [];
+  if (selectorSafe) {
+    try {
+      candidates.push(
+        ...document.querySelectorAll<HTMLImageElement>(
+          `img[src="${originalSrc.replace(/"/g, '\\"')}"]`,
+        ),
+      );
+    } catch {
+      // Malformed selector for this particular URL: use the scan below.
+    }
+  }
+
+  if (!candidates.length) {
+    for (const img of document.querySelectorAll<HTMLImageElement>("img")) {
+      if (img.src === originalSrc || img.getAttribute("src") === originalSrc) {
+        candidates.push(img);
+      }
+    }
+  }
+
+  return candidates.find((img) => img.parentElement !== wrapper) ?? null;
+}
+
 export function createImageObservers(
   originalSrc: string,
   wrapper: HTMLElement,
@@ -211,15 +252,12 @@ export function createImageObservers(
 
   // Re-attaches wrapper when SPA website remounts a fresh img element
   const domObserver = new MutationObserver(() => {
-    // Debounce so we only react after MangaDex finishes all its mutations
-    const allImgs = Array.from(
-      document.querySelectorAll<HTMLImageElement>(
-        `img[src="${originalSrc.replace(/"/g, '\\"')}"]`,
-      ),
-    );
-    if (!allImgs.length) return;
-
-    const freshImg = allImgs.find((img) => img.parentElement !== wrapper);
+    // `img[src="…"]` is only safe for short, selector-clean URLs. A data: URL
+    // is megabytes of base64, and a canvas has no img at all — building the
+    // selector for those either throws or matches nothing, so the wrapper was
+    // never re-attached and the page kept showing its untranslated copy
+    // (LMT-034). Fall back to identity/`src` comparison for those.
+    const freshImg = findLiveSourceElement(originalSrc, wrapper);
     if (!freshImg) return;
 
     domObserver.disconnect();

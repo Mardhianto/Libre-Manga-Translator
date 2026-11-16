@@ -11,6 +11,13 @@ import {
   validateTranslationResult,
   type LlmRunInfo,
 } from "../server/validator";
+import {
+  backoffDelayMs,
+  delayUnlessAborted,
+  isRetryableRequestError,
+  markTransient,
+  parseRetryAfterMs,
+} from "../request-retry";
 
 export async function translateWithGemini(
   imageSrc: string,
@@ -263,63 +270,119 @@ export async function sendRequestToGemini(
   // intermediary and server-side request logs.
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": key,
+  const body = JSON.stringify({
+    systemInstruction: {
+      parts: [{ text: systemPrompt }],
     },
-    body: JSON.stringify({
-      systemInstruction: {
-        parts: [{ text: systemPrompt }],
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: userPrompt }, ...(data ? [{ inlineData: data }] : [])],
       },
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { text: userPrompt },
-            ...(data ? [{ inlineData: data }] : []),
-          ],
-        },
-      ],
-      generationConfig: {
-        temperature,
-        responseMimeType: "application/json",
-      },
-    }),
-    signal,
+    ],
+    generationConfig: {
+      temperature,
+      responseMimeType: "application/json",
+    },
   });
 
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(
-      `Gemini API Error: ${errorData.error?.message || response.statusText}`,
-    );
-  }
+  /**
+   * Gemini is a shared, rate-limited cloud endpoint: a 503 "high demand" or a
+   * 429 is a property of the moment, not of the request. Without a retry, one
+   * temporary spike became a hard page failure — and multiplied by every page
+   * the auto-translate queue had in flight (LMT-034).
+   *
+   * Only 429/5xx/transport failures are retried; auth, model-name and content
+   * errors fail immediately, and an aborted job never resends.
+   */
+  let attempt = 0;
+  for (;;) {
+    signal?.throwIfAborted();
 
-  const result = await response.json();
-  const resultText = result.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!resultText) {
-    throw new Error("Gemini API returned empty response parts");
-  }
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": key,
+        },
+        body,
+        signal,
+      });
+    } catch (error) {
+      if (
+        attempt >= DefaultConfig.geminiMaxRetries ||
+        !isRetryableRequestError(error)
+      ) {
+        throw error;
+      }
+      const waited = await delayUnlessAborted(
+        backoffDelayMs(attempt, DefaultConfig.geminiRetryDelayMs),
+        signal,
+      );
+      if (!waited) throw error;
+      attempt += 1;
+      continue;
+    }
 
-  // Gemini reports STOP / MAX_TOKENS / SAFETY / ...; MAX_TOKENS is the cut
-  // signal the Debug export surfaces (LMT-032).
-  const finishReason: string | undefined = result.candidates?.[0]?.finishReason;
-  const info: LlmRunInfo = {
-    rawResponse: clipRawResponse(resultText),
-    finishReason: typeof finishReason === "string" ? finishReason : undefined,
-    promptChars: promptChars(systemPrompt, userPrompt),
-  };
+    if (!response.ok) {
+      // `await response.json()` on an HTML/empty error page throws an opaque
+      // parse error, which used to mask the HTTP status entirely.
+      const payload = await response
+        .json()
+        .catch(() => undefined as { error?: { message?: string } } | undefined);
+      const err = new Error(
+        `Gemini API Error: ${payload?.error?.message || response.statusText || `HTTP ${response.status}`}`,
+      ) as Error & { status?: number; retryAfterMs?: number };
+      err.status = response.status;
+      const retryAfterMs = parseRetryAfterMs(
+        response.headers.get("retry-after"),
+      );
+      if (retryAfterMs !== undefined) err.retryAfterMs = retryAfterMs;
+      if (response.status === 429 || response.status >= 500) {
+        markTransient(err);
+      }
 
-  try {
-    return { data: JSON.parse(resultText), info };
-  } catch (error) {
-    throw attachDiagnostics(
-      new Error(
-        `Gemini returned invalid JSON: ${(error as Error).message}`,
-      ),
-      info,
-    );
+      if (!isRetryableRequestError(err) || attempt >= DefaultConfig.geminiMaxRetries) {
+        throw err;
+      }
+      const waitMs =
+        retryAfterMs !== undefined && retryAfterMs > 0
+          ? retryAfterMs
+          : backoffDelayMs(attempt, DefaultConfig.geminiRetryDelayMs);
+      console.warn(
+        `[gemini] HTTP ${response.status} — retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt + 2}/${DefaultConfig.geminiMaxRetries + 1})`,
+      );
+      const waited = await delayUnlessAborted(waitMs, signal);
+      if (!waited) throw err;
+      attempt += 1;
+      continue;
+    }
+
+    const result = await response.json();
+    const resultText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!resultText) {
+      throw new Error("Gemini API returned empty response parts");
+    }
+
+    // Gemini reports STOP / MAX_TOKENS / SAFETY / ...; MAX_TOKENS is the cut
+    // signal the Debug export surfaces (LMT-032).
+    const finishReason: string | undefined =
+      result.candidates?.[0]?.finishReason;
+    const info: LlmRunInfo = {
+      rawResponse: clipRawResponse(resultText),
+      finishReason: typeof finishReason === "string" ? finishReason : undefined,
+      promptChars: promptChars(systemPrompt, userPrompt),
+    };
+
+    try {
+      return { data: JSON.parse(resultText), info };
+    } catch (error) {
+      throw attachDiagnostics(
+        new Error(`Gemini returned invalid JSON: ${(error as Error).message}`),
+        info,
+      );
+    }
   }
 }

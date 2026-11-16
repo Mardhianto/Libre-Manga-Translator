@@ -1,6 +1,11 @@
 import Overlay from "@/lib/components/Overlay.svelte";
 import Sidebar from "@/lib/components/Sidebar.svelte";
 import FloatingTrigger from "@/lib/components/FloatingTrigger.svelte";
+import AlertHost from "@/lib/components/overlay/AlertHost.svelte";
+import {
+  dismissAllAlerts,
+  pushNotice,
+} from "@/lib/components/overlay/alerts";
 import { AutoTranslateOrchestrator } from "./auto-translate";
 import * as Registry from "./translation-registry";
 import { mount, unmount } from "svelte";
@@ -117,8 +122,11 @@ async function captureTaintedCanvas(
       return null;
     }
 
+    // Hide our own chrome before the screenshot: the capture is a viewport
+    // grab, so any overlay, error dialog or toast that happens to sit over the
+    // page ends up baked into the translated image (LMT-034).
     const floatingHosts = document.querySelectorAll<HTMLElement>(
-      "lmt-floating-trigger, lmt-sidebar",
+      "lmt-floating-trigger, lmt-sidebar, lmt-alert, lmt-overlay",
     );
     const prevVisibility: string[] = [];
     floatingHosts.forEach((h, i) => {
@@ -233,6 +241,26 @@ export default defineContentScript({
     }).then((ui) => {
       ui.mount();
     });
+
+    // Document-level error channel (LMT-034). Deliberately its own shadow root
+    // on <body>, so no per-page overlay stacking context can cover it and one
+    // missed click can never strand the reader.
+    createShadowRootUi(ctx, {
+      name: "lmt-alert",
+      position: "inline",
+      anchor: "body",
+      append: "last",
+      onMount: (uiContainer) =>
+        mount(AlertHost, {
+          target: uiContainer,
+        }),
+      onRemove: (app) => {
+        if (app) unmount(app);
+      },
+    }).then((ui) => {
+      ui.mount();
+    });
+    ctx.onInvalidated(() => dismissAllAlerts());
 
     async function startTranslationPipeline(imgElement: MangaTargetElement) {
       if (!imgElement || !document.body.contains(imgElement)) return;
@@ -1015,7 +1043,18 @@ export default defineContentScript({
     // Created before the pill so manual clicks enqueue through the same
     // limiter: slider cap when auto is ON, absolute 3 when OFF.
     const autoTranslator = new AutoTranslateOrchestrator();
-    autoTranslator.init(startTranslationPipeline);
+    // The overlay owns the message for a single failed page (dialog for a
+    // manual run, toast while auto-translating). The queue only owns the
+    // retry budget and the decision to stop when a provider is clearly down
+    // (LMT-034) — that decision is announced here, once.
+    autoTranslator.init(startTranslationPipeline, {
+      onQueuePaused: (failedPages) =>
+        pushNotice(
+          `Auto-translate paused after repeated failures (${failedPages} page${failedPages === 1 ? "" : "s"}). Toggle auto-translate off and on to retry.`,
+          "error",
+          0,
+        ),
+    });
     ctx.onInvalidated(() => autoTranslator.destroy());
 
     // ── Floating Hover Trigger ──────────────────────────────────────────

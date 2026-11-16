@@ -29,6 +29,16 @@ import {
   type LlmRunInfo,
   type ValidatedTranslation,
 } from "./validator";
+import {
+  backoffDelayMs,
+  delayUnlessAborted,
+  isAbortError,
+  isNonRetryable,
+  isRetryableRequestError,
+  markNonRetryable,
+  markTransient,
+  parseRetryAfterMs,
+} from "../request-retry";
 
 export type { ServerConfig } from "./schemas";
 
@@ -68,66 +78,6 @@ const FORMAT_CHAINS: Record<ServerConfig["serverSchema"], ResponseFormatMode[]> 
   ollama: ["json_schema", "json_object", "none"],
 };
 
-/**
- * Marks a failure a second attempt cannot fix.
- *
- * A malformed or cut-off answer is a property of the request/answer pair: the
- * same prompt against the same `max_tokens` reproduces it. Retrying it burns a
- * second inference and hides the truncation the Debug export is meant to show
- * (LMT-027).
- */
-function markNonRetryable<T>(error: T): T {
-  if (error && typeof error === "object") {
-    (error as { lmtNoRetry?: boolean }).lmtNoRetry = true;
-  }
-  return error;
-}
-
-function isNonRetryable(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  return (error as { lmtNoRetry?: unknown }).lmtNoRetry === true;
-}
-
-/**
- * Local copy of `utils.isAbortError`: importing `utils` here would drag ONNX
- * Runtime into the service-worker bundle for one string check.
- */
-function isAbortError(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  if ((error as { name?: unknown }).name === "AbortError") return true;
-  const message = (error as { message?: unknown }).message;
-  return typeof message === "string" && /abort/i.test(message);
-}
-
-/**
- * Only transport failures and transient server states deserve another attempt.
- * 4xx means the request itself is wrong (auth, model name, unsupported
- * response_format), 429 is rate limiting, and 5xx is the server's problem.
- */
-function isRetryableRequestError(error: unknown): boolean {
-  if (isNonRetryable(error)) return false;
-  if (isAbortError(error)) return false;
-  const status = (error as Error & { status?: number } | undefined)?.status;
-  if (status === undefined) return true; // fetch threw: network/DNS/socket
-  return status === 429 || status >= 500;
-}
-
-/** Sleep that gives up immediately when the job is cancelled. */
-function delayUnlessAborted(ms: number, signal?: AbortSignal): Promise<boolean> {
-  if (signal?.aborted) return Promise.resolve(false);
-  return new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve(true);
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      resolve(false);
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
 /** Request-side knobs that survive format/capability fallbacks. */
 interface RequestScope {
   /** Answer budget; becomes `num_predict` / `max_tokens`. */
@@ -148,7 +98,6 @@ function mentionsField(error: unknown, field: RegExp): boolean {
   const message = (error as { message?: unknown } | undefined)?.message;
   return typeof message === "string" && field.test(message);
 }
-
 async function requestOnce(
   systemPrompt: string,
   userPrompt: string,
@@ -213,8 +162,15 @@ async function requestOnce(
     if (!response.ok) {
       const err = new Error(
         `API ${response.status}: ${(await response.text()).substring(0, 500)}`,
-      ) as Error & { status?: number };
+      ) as Error & { status?: number; retryAfterMs?: number };
       err.status = response.status;
+      // A server that names its own cool-down knows better than our backoff.
+      const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+      if (retryAfterMs !== undefined) err.retryAfterMs = retryAfterMs;
+      // Lets the overlay decide whether "Retry" is an honest offer.
+      if (response.status === 429 || response.status >= 500) {
+        markTransient(err);
+      }
       throw err;
     }
 
@@ -339,10 +295,15 @@ async function requestOnce(
       throw err;
     }
 
-    const waited = await delayUnlessAborted(
-      DefaultConfig.serverRetryDelayMs * (retryCount + 1),
-      signal,
-    );
+    // The server's own cool-down wins over our backoff; without one we widen
+    // the wait per attempt and jitter it so sibling pages of the same chapter
+    // do not resend into the same quota wall simultaneously.
+    const retryAfterMs = (err as { retryAfterMs?: number }).retryAfterMs;
+    const waitMs =
+      retryAfterMs !== undefined && retryAfterMs > 0
+        ? retryAfterMs
+        : backoffDelayMs(retryCount, DefaultConfig.serverRetryDelayMs);
+    const waited = await delayUnlessAborted(waitMs, signal);
     if (!waited) throw err;
 
     return requestOnce(

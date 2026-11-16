@@ -121,6 +121,14 @@ export const DefaultConfig = {
   serverMaxRetries: 1,
   serverRetryDelayMs: 2000,
 
+  /**
+   * Gemini is a shared cloud endpoint that answers 503 "high demand" and 429
+   * under load. Two extra attempts (~2 s, ~4 s + jitter) rides out a spike
+   * without turning a page into a hard failure (LMT-034).
+   */
+  geminiMaxRetries: 2,
+  geminiRetryDelayMs: 2000,
+
   // Per-job execution budgets (ms) for work forwarded to the offscreen
   // document (LMT-010 / LMT-027). The offscreen document owns the clock and
   // aborts the request at the deadline, so a slow page is actually cancelled

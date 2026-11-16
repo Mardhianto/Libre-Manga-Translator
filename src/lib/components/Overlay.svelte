@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { TriangleAlert } from "lucide-svelte";
   import { DefaultConfig, resolveLangGroup } from "@/lib/configs";
   import { env } from "@/lib/env";
   import { probeArtifactsCached } from "@/lib/utils";
@@ -13,6 +12,7 @@
     BubbleEditor,
     Toasts,
   } from "@/lib/components/overlay";
+  import { showAlert, dismissAlert, pushNotice } from "@/lib/components/overlay/alerts";
   import type { OverlayToast, ToastKind } from "@/lib/components/overlay/toasts";
   import type { InpaintPatch } from "@/lib/components/overlay/InpaintCanvasEditor.svelte";
   import type { EditorLayer, InpaintTool } from "@/lib/components/overlay/EditorToolbar.svelte";
@@ -54,7 +54,7 @@
           /** Box indices the recognizer failed or half-read (Phase B). */
           ocrFailures?: number[];
         }
-      | { error: string }
+      | { error: string; transient?: boolean }
     >;
     renderTranslations: (
       translations: Translations,
@@ -153,6 +153,23 @@
   let loadingMsg = $state("Detecting text…");
   let errorMsg = $state("");
   let errorTimer: ReturnType<typeof setTimeout>;
+  let alertId = $state<string | null>(null);
+  /**
+   * True while this page is being translated by the automatic queue. In that
+   * mode the reader is scrolling past pages, so a blocking dialog per failure
+   * is a wall of unclickable modals; failures become toasts instead
+   * (LMT-034). A manual run still deserves a dialog the user must acknowledge.
+   */
+  let autoMode = $state(false);
+
+  // A dismissed/closing overlay must not leave its dialog behind: the alert
+  // host outlives this component, so its Retry/Dismiss callbacks would fire
+  // against destroyed state (LMT-034).
+  $effect(() => {
+    return () => {
+      if (alertId) dismissAlert(alertId);
+    };
+  });
 
   function generateBoxId(): string {
     return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -344,16 +361,81 @@
     localStorage.setItem("lmt-reading-direction", readingDirection);
   });
 
-  function showError(msg: string) {
+  /**
+   * Report a failure to the user.
+   *
+   * Manual runs get the document-level dialog: the user asked for this page and
+   * is looking at it, so the error must stay until acknowledged. Automatic runs
+   * get a toast, because the reader is scrolling and a modal per failed page is
+   * unclickable noise; the queue caps the retries and pauses after a streak
+   * (LMT-034).
+   *
+   * `onRetry` is only wired when the failure is genuinely transient
+   * (429/5xx/network); a bad API key must not offer a button that cannot work.
+   */
+  function showError(
+    msg: string,
+    opts?: {
+      transient?: boolean;
+      onRetry?: () => void;
+      /**
+       * `false` for a non-failure advisory ("no text bubbles here"): it must
+       * not spend the auto queue's retry budget or count towards pausing.
+       */
+      report?: boolean;
+    },
+  ) {
     clearTimeout(errorTimer);
     errorMsg = msg;
+
+    // Tell the queue a page failed, whether or not a dialog is shown, so the
+    // retry budget is spent and a provider outage pauses the run.
+    if (opts?.report !== false) {
+      document.dispatchEvent(
+        new CustomEvent("lmt:translation-failure", {
+          detail: { src: originalSrc, message: msg },
+        }),
+      );
+    }
+
+    if (autoMode) {
+      // A toast, not a dialog: the queue's attempt budget and the pause rule
+      // are the real safety net here, and they live in auto-translate.ts.
+      // Close the overlay too — an auto run the user did not start must not
+      // leave a spinner or an empty editor pinned over the page.
+      errorMsg = "";
+      pushNotice(msg, opts?.transient ? "warn" : "error", 7000);
+      // Deferred: the caller is still unwinding its own error path.
+      setTimeout(() => onClose(), 0);
+      return;
+    }
+
+    alertId = `alert-${crypto.randomUUID?.() ?? Date.now()}`;
+    showAlert({
+      id: alertId,
+      message: msg,
+      kind: "error",
+      transient: opts?.transient ?? false,
+      onRetry: opts?.onRetry,
+      onDismiss: handleErrorDismiss,
+    });
     if (ERROR_AUTOCLOSE) {
-      errorTimer = setTimeout(() => (errorMsg = ""), 5000);
+      errorTimer = setTimeout(() => {
+        dismissAlert(alertId ?? undefined);
+        errorMsg = "";
+      }, 5000);
     }
   }
 
-  async function handleErrorDismiss() {
+  function clearError() {
+    clearTimeout(errorTimer);
+    if (alertId) dismissAlert(alertId);
+    alertId = null;
     errorMsg = "";
+  }
+
+  async function handleErrorDismiss() {
+    clearError();
     const skip =
       await storage.getItem<boolean>("sync:skip-bbox-refining");
     if (skip ?? false) {
@@ -364,6 +446,17 @@
     // drop to refining so the user can draw boxes manually.
     mode = "refining";
     Registry.markIdle(originalSrc);
+  }
+
+  /** Run a failed translate again from the alert's Retry button. */
+  function retryTranslation() {
+    clearError();
+    if (!bboxes.length) {
+      mode = "refining";
+      Registry.markIdle(originalSrc);
+      return;
+    }
+    void executeTranslation();
   }
 
 function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
@@ -530,7 +623,13 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     );
     if (typeof result === "object" && "error" in result) {
       mode = "refining";
-      showError(result.error);
+      // A provider hiccup deserves a Retry button; a wrong key or a bad model
+      // name does not (LMT-034).
+      const transient = result.transient === true;
+      showError(result.error, {
+        transient,
+        onRetry: transient ? retryTranslation : undefined,
+      });
       Registry.markIdle(originalSrc);
       return;
     }
@@ -623,7 +722,11 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
         cleanedUrl = await applyInpaintPatches(cleanedUrl || rawDisplaySrc, added, removed);
         inpaintPatches = [];
       } catch (err) {
-        showError("Failed to apply inpaint patches: " + (err as Error).message);
+        // A manual edit failure is not a page-translation failure: reporting it
+        // would spend the auto queue's retry budget for this page (LMT-034).
+        showError("Failed to apply inpaint patches: " + (err as Error).message, {
+          report: false,
+        });
       } finally {
         isApplyingInpaint = false;
       }
@@ -641,7 +744,9 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       mode = "results";
     } catch (err) {
       mode = "editing";
-      showError((err as Error).message);
+      // A render failure in the editor is a local canvas problem, not a page
+      // translation attempt: do not charge it to the auto queue (LMT-034).
+      showError((err as Error).message, { report: false });
     }
   }
 
@@ -667,12 +772,14 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     });
     forcingIndex = null;
     if (typeof result === "object" && "error" in result) {
-      showError(result.error);
+      // `transient: true` here means "don't log this attempt": the per-box
+      // retry shares the page's failure surface, not the debug log.
+      showError(result.error, { report: false });
       return;
     }
     const text = result.translations?.[0];
     if (!text) {
-      showError("Nothing readable in that box");
+      showError("Nothing readable in that box", { report: false });
       return;
     }
     bboxes[i].gateSkip = undefined;
@@ -688,7 +795,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
         $state.snapshot(bboxes),
       );
     } catch (err) {
-      showError((err as Error).message);
+      showError((err as Error).message, { report: false });
     }
   }
 
@@ -853,6 +960,15 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
   }
 
   onMount(async () => {
+    // Read the mode before detection: a failure during detection must already
+    // know whether a blocking dialog is appropriate (LMT-034).
+    const [skipRefining, autoTranslate, currentMode] = await Promise.all([
+      storage.getItem<boolean>("sync:skip-bbox-refining"),
+      storage.getItem<boolean>("sync:auto-translate"),
+      storage.getItem<string>("sync:current-mode"),
+    ]);
+    autoMode = autoTranslate ?? false;
+
     const initialCache = await getTranslationCache();
 
     const rawBboxes = initialCache
@@ -870,7 +986,11 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     }
 
     if (rawBboxes.length === 0) {
-      showError("No text bubbles detected - add boxes manually");
+      // Not a provider failure: an empty page is a normal outcome, so it must
+      // not spend the auto queue's retry budget.
+      showError("No text bubbles detected - add boxes manually", {
+        report: false,
+      });
     }
 
     // Filter out invalid/phantom boxes (NaN coords, zero or negative area)
@@ -902,11 +1022,6 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       cleanedUrl = initialCache.cleanedSrc ?? "";
       Registry.markDone(originalSrc);
     } else {
-      const [skipRefining, autoTranslate, currentMode] = await Promise.all([
-        storage.getItem<boolean>("sync:skip-bbox-refining"),
-        storage.getItem<boolean>("sync:auto-translate"),
-        storage.getItem<string>("sync:current-mode"),
-      ]);
       // Gemini transcribes and translates the whole page itself, answering one
       // item per numbered box, so manual box review adds a click without changing
       // what is uploaded. Zero boxes still opens the editor — there is nothing to
@@ -961,7 +1076,10 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       e.stopPropagation();
       e.preventDefault();
       if (errorMsg) {
-        handleErrorDismiss();
+        // The dialog is dismissible from its own host too; going through the
+        // shared alert id keeps both surfaces in sync (LMT-034).
+        if (alertId) dismissAlert(alertId);
+        void handleErrorDismiss();
       } else if (mode === "editing") {
         cancelEditorChanges();
       } else if (activeIndex !== null) {
@@ -1211,13 +1329,14 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     if (wrapper) {
       wrapper.setAttribute("data-lmt-mode", mode);
       wrapper.setAttribute("data-lmt-progress", loadingMsg);
+      // Only the wrapper we own gets a z-index (LMT-034). Writing it onto
+      // `wrapper.parentElement` turned a page-owned layout node into a
+      // stacking context: on MangaOne that reordered the spread and let a
+      // neighbouring page's transparent tap layer cover this overlay's UI.
+      // A parent z-index was also never restored, so one refining pass left
+      // the page permanently restyled.
       const isInteractive = mode === "refining" || mode === "editing";
-      const zVal = isInteractive ? (isWrapperHovered ? "60" : "50") : "";
-      wrapper.style.zIndex = zVal;
-      const parent = wrapper.parentElement;
-      if (parent) {
-        parent.style.zIndex = zVal;
-      }
+      wrapper.style.zIndex = isInteractive ? (isWrapperHovered ? "60" : "50") : "";
       wrapper.dispatchEvent(
         new CustomEvent("lmt:mode-change", { detail: { mode }, bubbles: true }),
       );
@@ -1490,50 +1609,6 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
   {/if}
 
   <Toasts {toasts} onDismiss={dismissToast} />
-  
-  {#if errorMsg}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div
-      class="absolute inset-0 flex items-center justify-center z-70 bg-black/60 backdrop-blur-sm pointer-events-auto select-none cursor-pointer"
-      onclick={(e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        handleErrorDismiss();
-      }}
-      onmousedown={(e) => e.stopPropagation()}
-      onpointerdown={(e) => e.stopPropagation()}
-      role="alert"
-    >
-      <div
-        role="presentation"
-        class="flex flex-col items-center gap-3 bg-[#121a26]/95 border border-rose-500/50 rounded-[6px] shadow-[0_8px_32px_rgba(0,0,0,0.8),0_0_16px_rgba(244,63,94,0.25)] px-6 py-5 max-w-[85%] text-center backdrop-blur-md cursor-default"
-        onclick={(e) => {
-          e.stopPropagation();
-          e.preventDefault();
-        }}
-        onmousedown={(e) => e.stopPropagation()}
-        onpointerdown={(e) => e.stopPropagation()}
-        onkeydown={(e) => e.stopPropagation()}
-      >
-        <TriangleAlert size={28} class="text-rose-400 shrink-0" />
-        <p class="text-xs font-mono text-rose-200 leading-relaxed max-h-40 overflow-y-auto custom-scrollbar">{errorMsg}</p>
-        <button
-          type="button"
-          onclick={(e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            handleErrorDismiss();
-          }}
-          onmousedown={(e) => e.stopPropagation()}
-          onpointerdown={(e) => e.stopPropagation()}
-          class="mt-1 px-3 py-1 rounded-[3px] bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-xs font-mono border border-rose-500/40 cursor-pointer transition-colors"
-        >
-          Dismiss
-        </button>
-      </div>
-    </div>
-  {/if}
 </div>
 
 <style>

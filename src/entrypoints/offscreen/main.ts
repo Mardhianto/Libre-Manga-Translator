@@ -7,6 +7,7 @@ import {
   translateWithServer,
 } from "@/lib/server/main";
 import { diagnosticsFromError } from "@/lib/server/validator";
+import { isTransientError } from "@/lib/request-retry";
 import { deleteModelAllInfoInCache, hasModelInCache } from "@mlc-ai/web-llm";
 import { makeSiteRuleLocal, translateLocal } from "@/lib/webllm";
 import { releaseLocalLlmIdle, applyMode } from "@/lib/webllm";
@@ -63,12 +64,17 @@ function serverConfig(config: Record<string, any>) {
  *
  * Only the run fields are sent: a failed page has no expected/received count,
  * and inventing zeros would read like a validation measurement.
+ *
+ * `transient` tells the overlay whether offering "Retry" is honest (LMT-034):
+ * a 429/5xx/network failure can succeed in a moment, a 400 from a bad API key
+ * cannot, and a button that cannot work is worse than no button.
  */
 function errorResponse(err: unknown) {
   const run = diagnosticsFromError(err);
   return {
     error: (err as Error).message,
     ...(run ? { diagnostics: run } : {}),
+    ...(isTransientError(err) ? { transient: true } : {}),
   };
 }
 
