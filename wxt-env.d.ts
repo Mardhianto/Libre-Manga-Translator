@@ -55,11 +55,23 @@ interface SeriesContext {
   translatedCount: number;
 }
 
+interface PageCacheFingerprint {
+  sourceLang: string;
+  targetLang: string;
+  ocrEngine: string;
+  ocrMinConfidence: number;
+  detectionModel: string;
+  llmModel: string;
+  temperature: number;
+  promptVersion: number;
+}
+
 interface PageCache {
   bboxes: Bbox[];
   translations: Translations;
   sourceTexts?: string[];
   cleanedSrc?: string;
+  fingerprint?: PageCacheFingerprint;
 }
 
 interface TranslationDiagnostics {
@@ -80,6 +92,18 @@ interface TranslationDiagnostics {
   finishReason?: string;
   /** Characters sent: system prompt + user prompt. */
   promptChars?: number;
+  /** Estimated prompt tokens (LMT-024). */
+  promptTokens?: number;
+  /** The server's own prompt count; compare against the estimate. */
+  promptEvalCount?: number;
+  /** Context window requested; native Ollama only. */
+  numCtx?: number;
+  /** True when the request carried `think:false` / `reasoning_effort:none`. */
+  thinkingDisabled?: boolean;
+  /** Prompt-size verdict for the request that produced this page. */
+  budgetLevel?: "ok" | "warn" | "over";
+  /** Why the prompt does not fit, when it does not. */
+  budgetWarning?: string;
   /** The validator never fabricates missing entries, so this is false today. */
   padded?: boolean;
   /** True when `finishReason` says the provider hit its output cap. */
@@ -126,6 +150,11 @@ interface DebugEntry {
   sourceTexts?: string[];
   translations?: string[];
   untranslated?: number[];
+  /**
+   * Box indices the recognizer failed or half-read. The model never saw their
+   * text, so they are not `untranslated` — they are missing input.
+   */
+  ocrFailures?: number[];
   /** Model answer before parsing (first 4 KB) — see `TranslationDiagnostics`. */
   rawResponse?: string;
   /** LLM requests spent on this page. */
@@ -134,6 +163,18 @@ interface DebugEntry {
   finishReason?: string;
   /** Characters sent: system prompt + user prompt. */
   promptChars?: number;
+  /** Estimated prompt tokens (LMT-024). */
+  promptTokens?: number;
+  /** The server's own prompt count, when the backend reports one. */
+  promptEvalCount?: number;
+  /** Context window requested; native Ollama only. */
+  numCtx?: number;
+  /** True when thinking tokens were suppressed for this request. */
+  thinkingDisabled?: boolean;
+  /** Prompt-size verdict: ok / warn / over. */
+  budgetLevel?: "ok" | "warn" | "over";
+  /** Why the prompt does not fit, when it does not. */
+  budgetWarning?: string;
   /** Validator never fabricates entries, so this stays false today. */
   padded?: boolean;
   /** `finishReason` hit the output cap. */

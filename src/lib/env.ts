@@ -4,7 +4,9 @@
 const metaEnv = ((import.meta as any).env || {}) as Record<string, string | undefined>;
 
 export const env = {
-  githubRepo: metaEnv.WXT_GITHUB_REPO || "",
+  githubRepo:
+    metaEnv.WXT_GITHUB_REPO ||
+    "https://github.com/mardhianto/libre-manga-translator",
 
   // Detection models
   rtdetrModelRepo:

@@ -12,6 +12,10 @@ import {
   type LlmRunInfo,
   type ValidatedTranslation,
 } from "./server/validator";
+import {
+  keepBetterTranslation,
+  untranslatedCorrectionPrompt,
+} from "./server/correction";
 import { fetchAndCacheWithProgress } from "./utils";
 // Bundled at build time (8.4MB .wasm asset, not .js — outside the AMO
 // 2MB-per-.js rule). Never the CDN variant (remote code is rejected).
@@ -505,13 +509,26 @@ async function translateWithWllamaUncounted(
     first.llmPerf ? { ...result, llmPerf: first.llmPerf } : result;
 
   try {
+    const validated = validateTranslationResult(first.data, ocrResults.length, {
+      sourceTexts: ocrResults,
+      sourceLang,
+      targetLang,
+      run: mergeRunInfo(calls),
+    });
     return withPerf(
-      validateTranslationResult(first.data, ocrResults.length, {
-        sourceTexts: ocrResults,
+      await correctUntranslatedWllama(
+        validated,
+        systemPrompt,
+        userPrompt,
+        JSON.stringify(schema),
+        def,
+        temperature,
+        ocrResults,
         sourceLang,
         targetLang,
-        run: mergeRunInfo(calls),
-      }),
+        calls,
+        signal,
+      ),
     );
   } catch (error) {
     if (!isTranslationValidationError(error)) throw error;
@@ -540,6 +557,54 @@ async function translateWithWllamaUncounted(
     } catch (retryError) {
       throw attachDiagnostics(retryError, mergeRunInfo(calls));
     }
+  }
+}
+
+/**
+ * One correction round for boxes the validator refused (C3). The page parsed
+ * and every box has an entry, so this is not the format-failure path above:
+ * the model simply left some boxes empty, echoed, or in the wrong language.
+ */
+async function correctUntranslatedWllama(
+  first: ValidatedTranslation,
+  systemPrompt: string,
+  userPrompt: string,
+  schemaStr: string,
+  def: LlmModelDef,
+  temperature: number,
+  ocrResults: string[],
+  sourceLang: string,
+  targetLang: string,
+  calls: LlmRunInfo[],
+  signal?: AbortSignal,
+): Promise<ValidatedTranslation> {
+  const flagged = first.diagnostics.untranslated;
+  if (flagged.length === 0) return first;
+
+  try {
+    const correctionPrompt = untranslatedCorrectionPrompt(flagged);
+    const corrected = await runWllamaModel(
+      systemPrompt,
+      `${userPrompt}\n\nCORRECTION: ${correctionPrompt}\nReturn the full corrected JSON now.`,
+      schemaStr,
+      def,
+      temperature,
+      signal,
+    );
+    calls.push(corrected.info);
+    const second = validateTranslationResult(corrected.data, ocrResults.length, {
+      sourceTexts: ocrResults,
+      sourceLang,
+      targetLang,
+      run: mergeRunInfo(calls),
+    });
+    return keepBetterTranslation(first, second);
+  } catch (error) {
+    console.warn(
+      `[wllama] untranslated correction failed — keeping the first answer:`,
+      error,
+    );
+    return first;
   }
 }
 

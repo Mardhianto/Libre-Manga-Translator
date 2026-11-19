@@ -1,6 +1,13 @@
 import { DefaultConfig } from "./configs";
 import { MAKE_SITE_RULE_PROMPT } from "./adapters";
 
+/**
+ * Increment this whenever prompt structure, system instructions, or rules
+ * change. A bumped version invalidates cached page translations so improved
+ * prompts immediately take effect on revisited pages.
+ */
+export const PROMPT_VERSION = 1;
+
 export function buildTranslationPrompts(
   ocrResults: string[],
   targetLang: string,
@@ -33,21 +40,33 @@ export function buildTranslationPrompts(
     })
     .join("\n");
 
-  const emptyRuleNumber = needsContext ? 4 : 3;
-  const contextRule = needsContext
-    ? `3. The "summary" and "dictionary" fields MUST remain strictly in ENGLISH to act as a system memory pivot.\n`
-    : "";
-
   // "Auto-Detect" is a UI choice, not a language: pass the script the gate
   // actually identified so the model is not asked to guess the input language
-  // as well. When nothing was identified, say that plainly instead
-  // of dropping the clause and implying the input is English.
+  // as well. When nothing was identified, say that plainly instead of
+  // dropping the clause and implying the input is English.
   const autoDetected = sourceLang === "Auto-Detect";
   const sourceClause = autoDetected
     ? detectedLabel
       ? ` FROM ${detectedLabel.toUpperCase()} (auto-detected script)`
       : " FROM the source language of the text in each box"
     : ` FROM ${sourceLang.toUpperCase()}`;
+
+  const rules: string[] = [
+    `1. The dialogue inside the "translations" array MUST be strictly in ${targetLang.toUpperCase()}. DO NOT transcribe the original text, and do not leave source-script characters, stray kana, or untranslated words in the output. You must output the translated meaning.`,
+    `2. The "translations" array MUST contain EXACTLY ${count} items, in the same order as the input boxes (Box 1 → index 0, Box 2 → index 1, …). NEVER merge, drop, split, or add items — one output string per input box, even if some boxes look alike.`,
+    // The reported omissions were whole clauses, not vocabulary errors:
+    // the model summarised the box instead of translating it.
+    `3. Translate EVERY clause in a box, including sentence endings and trailing particles. Never summarise, abbreviate, merge sentences, or omit a clause because it looks repetitive.`,
+    `4. Output ONLY the translation. Never add commentary, notes, explanations, translator asides, or meta text such as "Here is the translation".`,
+  ];
+  if (needsContext) {
+    rules.push(
+      `5. The "summary" and "dictionary" fields MUST remain strictly in ENGLISH to act as a system memory pivot.`,
+    );
+  }
+  rules.push(
+    `${needsContext ? 6 : 5}. If a box is empty (""), return "" at the same index. Empty input MUST stay empty output — do not delete the entry or borrow a neighbour's text.`,
+  );
 
   const systemPrompt = `You are a professional manga translator${seriesContext?.seriesName ? ` working on "${seriesContext.seriesName}"` : ""}.
 Your task is to translate extracted manga dialogue${sourceClause} INTO ${targetLang.toUpperCase()}.
@@ -57,9 +76,7 @@ ${seriesContext?.dictionary ? `\nTerm dictionary (always use these): ${seriesCon
 ${seriesContext?.recentHistory?.length ? `\nPrevious pages for continuity:\n${seriesContext.recentHistory.map((h, i) => `Page -${seriesContext.recentHistory.length - i}: ${h.text}`).join("\n")}` : ""}
 
 CRITICAL INSTRUCTIONS:
-1. The dialogue inside the "translations" array MUST be strictly in ${targetLang.toUpperCase()}. DO NOT transcribe the original text. You must output the translated meaning.
-2. The "translations" array MUST contain EXACTLY ${count} items, in the same order as the input boxes (Box 1 → index 0, Box 2 → index 1, …). NEVER merge, drop, split, or add items — one output string per input box, even if some boxes look alike.
-${contextRule}${emptyRuleNumber}. If a box is empty (""), return "" at the same index. Empty input MUST stay empty output — do not delete the entry or borrow a neighbour's text.
+${rules.join("\n")}
 
 Output strictly as valid JSON matching this structure exactly (EXACTLY ${count} items in "translations"):
 {

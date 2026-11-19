@@ -14,6 +14,7 @@ import {
   isCjkLabel,
   isTrustedLabel,
   isAbstentionLabel,
+  isUnsupportedLabel,
   japaneseCharCount,
   expectedClassesForSource,
 } from "../src/lib/gate/charset";
@@ -27,6 +28,7 @@ import {
   decideSkip,
   gateModeFor,
   groupForLabel,
+  UNSUPPORTED_GROUP,
   type LineScript,
   type RegionVerdict,
 } from "../src/lib/gate";
@@ -222,6 +224,39 @@ check(
   decideSkip("auto", { decision: "clean", script: "Latin", weight: 4 }, EN, "Auto-Detect", "Latin") === null,
 );
 check("skip: auto without page label keeps everything", decideSkip("auto", null, EN, "Auto-Detect", null) === null);
+
+// --- label authority + pack resolution (vertical-JA report) -----------------
+check(
+  "skip: auto ignores an unreadable page majority (Khmer)",
+  decideSkip(
+    "auto",
+    { decision: "clean", script: "Japanese", weight: 4 },
+    JA,
+    "Auto-Detect",
+    "Khmer",
+  ) === null,
+);
+check(
+  "skip: auto still trusts a readable page majority",
+  decideSkip(
+    "auto",
+    { decision: "clean", script: "Japanese", weight: 4 },
+    JA,
+    "Auto-Detect",
+    "Latin",
+  ) === "not-japanese",
+);
+check("labels: unsupported set is honest", ["Khmer", "Tibetan", "Lao", "Myanmar-dn"].every(isUnsupportedLabel));
+check(
+  "labels: shipped scripts are not unsupported",
+  ["Japanese", "Japanese_vert", "Latin", "Hangul_vert", "HanS", "Thai"].every((l) => !isUnsupportedLabel(l)),
+);
+check("group: Japanese -> chinese", groupForLabel("Japanese") === "chinese");
+check("group: -dn suffix resolves", groupForLabel("Japanese_vert-dn") === "chinese");
+check("group: Latin -> latin", groupForLabel("Latin") === "latin");
+check("group: Khmer is unsupported, not null", groupForLabel("Khmer") === UNSUPPORTED_GROUP);
+check("group: no label is null (no evidence)", groupForLabel(null) === null);
+check("group: abstention labels are null, not unsupported", groupForLabel("Common") === null);
 
 check("mode: cjk source", gateModeFor("Japanese", true, false) === "cjk");
 check("mode: force turns off", gateModeFor("Japanese", true, true) === "off");

@@ -111,16 +111,43 @@ export const DefaultConfig = {
 
   // External LLM server (API Mode) - Ollama / LM Studio / OpenAI-compatible
   serverHost: "http://127.0.0.1:11434/v1",
-  serverSchema: "openai",
+  /**
+   * Native `/api/chat`. The OpenAI-compatible path cannot carry `num_ctx` or
+   * `think`: Ollama drops the first and silently cuts the start of any prompt
+   * that overflows, and thinking tokens spend the answer budget (LMT-024).
+   * The default host is Ollama, so the default schema is the one that works
+   * with it. Saved profiles keep their own value.
+   */
+  serverSchema: "ollama",
   serverModel: "qwen3.5:4b",
   useServerApiKey: false,
   serverApiKey: "",
   serverEndpoints: {
     openai: "chat/completions",
-    lmstudio: "chat",
+    // The OpenAI API LM Studio serves at /v1 (LMT-018/033).
+    lmstudio: "v1/chat/completions",
+    ollama: "api/chat",
   },
+  /**
+   * Context window requested per translate. Ollama's own default is 4096, and
+   * `resolveNumCtx` still grows past this when a page plus its answer needs
+   * more - a window smaller than the prompt is what silently truncates it.
+   */
+  serverNumCtx: 4096,
+  /** Ask the model to skip reasoning tokens; they are billed to the answer cap. */
+  serverDisableThinking: false,
+  /** Fallback answer budget when a caller does not size it per page. */
+  serverMaxOutputTokens: 4096,
   serverMaxRetries: 1,
   serverRetryDelayMs: 2000,
+
+  /**
+   * Gemini is a shared cloud endpoint that answers 503 "high demand" and 429
+   * under load. Two extra attempts (~2 s, ~4 s + jitter) rides out a spike
+   * without turning a page into a hard failure (LMT-034).
+   */
+  geminiMaxRetries: 2,
+  geminiRetryDelayMs: 2000,
 
   // Per-job execution budgets (ms) for work forwarded to the offscreen
   // document (LMT-010 / LMT-027). The offscreen document owns the clock and

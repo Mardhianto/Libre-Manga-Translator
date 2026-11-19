@@ -39,6 +39,43 @@
     onRetranslateBox,
   }: Props = $props();
 
+  let displayEl: HTMLElement | undefined = $state(undefined);
+
+  /**
+   * Every rendered box shares the same offsetParent — the `#lmt-overlay`
+   * surface, which is sized exactly to the manga image's rendered box.
+   */
+  function captureDisplayEl(node: HTMLElement) {
+    const parent = node.offsetParent;
+    if (parent instanceof HTMLElement) displayEl = parent;
+  }
+
+  // Pull any box that ended up outside the image display back inside: free
+  // box drags/resizes and detector output can both leave a box hanging off
+  // the image edge, where its text could never be painted.
+  $effect(() => {
+    void scaleX;
+    void scaleY;
+    void displayEl;
+    const display = displayEl?.getBoundingClientRect();
+    if (!display || display.width <= 0 || display.height <= 0) return;
+    const natW = display.width / (scaleX || 1);
+    const natH = display.height / (scaleY || 1);
+    bboxes.forEach((box, i) => {
+      // Mid-resize inversions are normalized on mouse-up — leave them alone.
+      if (box.x1 > box.x2 || box.y1 > box.y2) return;
+      const w = box.x2 - box.x1;
+      const h = box.y2 - box.y1;
+      const cw = Math.min(w, natW);
+      const ch = Math.min(h, natH);
+      const x1 = Math.max(0, Math.min(box.x1, natW - cw));
+      const y1 = Math.max(0, Math.min(box.y1, natH - ch));
+      if (x1 !== box.x1 || y1 !== box.y1 || cw !== w || ch !== h) {
+        bboxes[i] = { ...box, x1, y1, x2: x1 + cw, y2: y1 + ch };
+      }
+    });
+  });
+
   function stopHostKeydown(e: KeyboardEvent) {
     e.stopPropagation();
     // Do not let manga reader arrow keys / page-turns fire while typing
@@ -87,6 +124,7 @@
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div
+    use:captureDisplayEl
     role="presentation"
     class="lmt-box absolute p-0 m-0 transition-colors select-none group
            {isActive

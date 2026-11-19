@@ -35,6 +35,7 @@ async function buildLlmAppConfig(): Promise<AppConfig> {
  * directly. Ensures per-model overrides always apply and the heavy vendor
  * chunk loads lazily.
  */
+export { buildLlmAppConfig as llmAppConfig };
 export async function createLlmEngine(
   config: Omit<MLCEngineConfig, "appConfig"> = {},
 ): Promise<MLCEngine> {

@@ -16,7 +16,9 @@
     PenLine,
     Download,
     Image,
+    RefreshCw,
   } from "lucide-svelte";
+  import { clampOffsetInside, isRectOutside, overlayDisplayEl } from "./bounds";
 
   interface Props {
     mode: "refining" | "results";
@@ -43,6 +45,10 @@
     onEditTranslations?: () => void;
     onExportJpg?: () => void;
     onToggleOriginal?: () => void;
+    isStale?: boolean;
+    onRetranslate?: () => void;
+    /** Reset the refining toolbar to its default position (owned by Overlay). */
+    onResetPosition?: () => void;
   }
 
   let {
@@ -70,7 +76,12 @@
     onEditTranslations,
     onExportJpg,
     onToggleOriginal,
+    isStale = false,
+    onRetranslate,
+    onResetPosition,
   }: Props = $props();
+
+  let rootEl: HTMLDivElement | undefined = $state(undefined);
 
   function getInitialResultsOffset(): { x: number; y: number } {
     try {
@@ -104,10 +115,26 @@
       if (!resultsDragStart) return;
       const dx = moveEvent.clientX - resultsDragStart.mouseX;
       const dy = moveEvent.clientY - resultsDragStart.mouseY;
-      resultsOffset = {
+      const rect =
+        rootEl instanceof HTMLDivElement ? rootEl.getBoundingClientRect() : null;
+      const display = overlayDisplayEl(rootEl)?.getBoundingClientRect() ?? null;
+      const next = {
         x: resultsDragStart.initialX + dx,
         y: resultsDragStart.initialY + dy,
       };
+      if (rect && display) {
+        // Keep the cluster inside the image display while dragging; if it
+        // cannot fit at all, fall back to the default corner position.
+        const clamped = clampOffsetInside(
+          rect,
+          display,
+          { x: resultsOffset.x, y: resultsOffset.y },
+          next,
+        );
+        resultsOffset = clamped ?? { x: 0, y: 0 };
+      } else {
+        resultsOffset = next;
+      }
     };
 
     const handleMouseUp = () => {
@@ -135,10 +162,68 @@
   function trapEvent(e: Event) {
     e.stopPropagation();
   }
+
+  /**
+   * When the toolbar is rendered, check whether it sits outside the image
+   * display; if it does, return to the default position. The refining mode
+   * position is owned by Overlay (via `onResetPosition`); the results cluster
+   * offset is local and persisted, so resetting also fixes the stored value.
+   */
+  function ensureInsideDisplay(): void {
+    const el = rootEl;
+    const displayEl = overlayDisplayEl(el);
+    if (!(el instanceof HTMLDivElement) || !displayEl) return;
+    const rect = el.getBoundingClientRect();
+    const display = displayEl.getBoundingClientRect();
+    if (!isRectOutside(rect, display)) return;
+    if (mode === "refining") {
+      // While dragging, the drag clamp in Overlay owns containment; this
+      // reset only corrects drift (re-layout, scroll, stale saved position).
+      if (!isDraggingToolbar) onResetPosition?.();
+    } else if (resultsOffset.x !== 0 || resultsOffset.y !== 0) {
+      resultsOffset = { x: 0, y: 0 };
+      try {
+        localStorage.setItem("lmt-results-offset", JSON.stringify(resultsOffset));
+      } catch {}
+    }
+  }
+
+  // Check on every render (position/offset changes re-run it).
+  $effect(() => {
+    void mode;
+    void position;
+    void resultsOffset.x;
+    void resultsOffset.y;
+    ensureInsideDisplay();
+  });
+
+  // Re-check when the image display or the toolbar itself is resized, and on
+  // scroll: the refining toolbar is viewport-fixed while the image is not,
+  // so scrolling can leave it stranded outside the image display.
+  $effect(() => {
+    const el = rootEl;
+    const displayEl = overlayDisplayEl(el);
+    if (!(el instanceof HTMLDivElement) || !displayEl) return;
+    const observer = new ResizeObserver(() => ensureInsideDisplay());
+    observer.observe(displayEl);
+    observer.observe(el);
+    window.addEventListener("scroll", ensureInsideDisplay, {
+      capture: true,
+      passive: true,
+    });
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("scroll", ensureInsideDisplay, {
+        capture: true,
+      });
+    };
+  });
 </script>
 
 {#if mode === "refining"}
   <div
+    bind:this={rootEl}
+    data-lmt-toolbar
     class="fixed z-60 flex items-center gap-2 select-none flex-col pointer-events-auto
            {isDragActive ? 'opacity-30 pointer-events-none' : ''}
            {isDraggingToolbar ? 'transition-none cursor-grabbing' : 'transition-all duration-150'}"
@@ -155,17 +240,6 @@
     <div
       class="relative flex items-center gap-1.5 p-1 rounded-[6px] border border-[var(--border-line)] bg-[var(--surface-panel)] backdrop-blur-md shadow-[0_12px_40px_rgba(0,0,0,0.7),0_0_16px_var(--accent-cyan-glow)]"
     >
-      <!-- Main Toolbar Drag Handle -->
-      <button
-        type="button"
-        onmousedown={onDragStart}
-        title="Drag to move toolbar anywhere (可拖拽自由移动)"
-        class="h-8 px-1.5 inline-flex items-center justify-center rounded-[3px] text-[var(--text-muted)] hover:text-[var(--accent-cyan)] hover:bg-[var(--surface-panel)] transition-colors cursor-grab active:cursor-grabbing border border-transparent hover:border-[var(--border-line)] shrink-0"
-        aria-label="Drag toolbar"
-      >
-        <GripVertical size={14} />
-      </button>
-
       <!-- Add Box -->
       <button
         type="button"
@@ -298,6 +372,7 @@
 {:else if mode === "results"}
   <!-- Floating Action Cluster on Results -->
   <div
+    bind:this={rootEl}
     class="absolute left-2.5 bottom-2.5 flex flex-col gap-1 z-50 select-none pointer-events-auto {isDraggingResults ? 'transition-none cursor-grabbing' : 'transition-transform duration-150'}"
     style="transform: translate({resultsOffset.x}px, {resultsOffset.y}px);"
     onclick={(e) => {
@@ -320,6 +395,18 @@
       >
         <GripHorizontal size={14} />
       </button>
+
+      <!-- Re-translate Page -->
+      {#if onRetranslate}
+        <button
+          type="button"
+          onclick={trapClick(onRetranslate)}
+          title={isStale ? "Settings changed — Click to re-translate page" : "Re-translate page"}
+          class="w-8 h-8 inline-flex items-center justify-center rounded-[4px] p-0 shrink-0 {isStale ? 'text-[var(--accent-amber)] animate-pulse' : 'text-[var(--text-muted)]'} hover:text-[var(--accent-cyan)] hover:bg-[var(--surface-panel)] transition-colors cursor-pointer border border-transparent hover:border-[var(--border-line)]"
+        >
+          <RefreshCw size={16} />
+        </button>
+      {/if}
 
       <!-- Refine Boxes -->
       <button

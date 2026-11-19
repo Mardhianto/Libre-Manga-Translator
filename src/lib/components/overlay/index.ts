@@ -1,4 +1,5 @@
 export { default as OverlayToolbar } from "./OverlayToolbar.svelte";
+export { default as AlertHost } from "./AlertHost.svelte";
 export { default as EditorToolbar } from "./EditorToolbar.svelte";
 export { default as ContextualStyleBar } from "./ContextualStyleBar.svelte";
 export { default as FloatingRawTextPill } from "./FloatingRawTextPill.svelte";

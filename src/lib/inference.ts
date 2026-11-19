@@ -14,6 +14,7 @@ import {
   translateWithServer,
 } from "./server/main";
 import { diagnosticsFromError } from "./server/validator";
+import { isTransientError } from "./request-retry";
 // NOTE: @mlc-ai/web-llm must stay dynamically imported (see webllm.ts and
 // the FIREFOX gates below). A static import would bake the multi-MB
 // prebundled file into shared initial chunks and break the 2MB-per-.js
@@ -127,7 +128,24 @@ function errorResponse(err: unknown) {
   return {
     error: (err as Error).message,
     ...(run ? { diagnostics: run } : {}),
+    ...(isTransientError(err) ? { transient: true } : {}),
   };
+}
+
+/**
+ * Boxes whose recognition failed or lost half their lines. Gate-skipped boxes
+ * are excluded on purpose: they were held back deliberately, not failed.
+ *
+ * The content script needs this because `""` in `sourceTexts` is otherwise
+ * indistinguishable from a legitimately empty bubble, and that ambiguity is
+ * exactly why a broken page could be cached as a finished one.
+ */
+function ocrFailureIndexes(
+  results: { failed?: boolean; partial?: boolean; gateSkip?: unknown }[],
+): number[] {
+  return results
+    .map((r, i) => (!r.gateSkip && (r.failed || r.partial) ? i : -1))
+    .filter((i) => i >= 0);
 }
 
 async function translateLocalRouted(
@@ -233,6 +251,10 @@ function serverConfig(config: Record<string, any>) {
     useServerApiKey: config.useServerApiKey,
     serverApiKey: config.serverApiKey,
     temperature: config.llmTemperature,
+    // Prompt budget knobs (LMT-024). Absent values fall back to
+    // `DefaultConfig` inside `callServer`.
+    numCtx: config.serverNumCtx,
+    disableThinking: config.serverDisableThinking,
   };
 }
 
@@ -477,6 +499,7 @@ export async function handleTranslateImage(msg: any): Promise<unknown> {
         ...res,
         sourceTexts: ocrResults.map((r) => r.text),
         gateSkip: ocrResults.map((r) => r.gateSkip ?? null),
+        ocrFailures: ocrFailureIndexes(ocrResults),
         gate: ocrOut.gate,
         timing: { ocr, translate: performance.now() - tTrans },
         backend,
@@ -516,6 +539,7 @@ export async function handleTranslateImage(msg: any): Promise<unknown> {
         ...res,
         sourceTexts: ocrResults.map((r) => r.text),
         gateSkip: ocrResults.map((r) => r.gateSkip ?? null),
+        ocrFailures: ocrFailureIndexes(ocrResults),
         gate: ocrOut.gate,
         timing: { ocr, translate: performance.now() - tTrans },
       };

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { TriangleAlert } from "lucide-svelte";
   import { DefaultConfig, resolveLangGroup } from "@/lib/configs";
   import { env } from "@/lib/env";
   import { probeArtifactsCached } from "@/lib/utils";
@@ -13,6 +12,7 @@
     BubbleEditor,
     Toasts,
   } from "@/lib/components/overlay";
+  import { showAlert, dismissAlert, pushNotice } from "@/lib/components/overlay/alerts";
   import type { OverlayToast, ToastKind } from "@/lib/components/overlay/toasts";
   import type { InpaintPatch } from "@/lib/components/overlay/InpaintCanvasEditor.svelte";
   import type { EditorLayer, InpaintTool } from "@/lib/components/overlay/EditorToolbar.svelte";
@@ -51,12 +51,15 @@
           diagnostics?: TranslationDiagnostics;
           gateSkip?: (GateReason | null)[];
           gate?: DebugEntry["gate"];
+          /** Box indices the recognizer failed or half-read (Phase B). */
+          ocrFailures?: number[];
         }
-      | { error: string }
+      | { error: string; transient?: boolean }
     >;
     renderTranslations: (
       translations: Translations,
       bboxes: Bbox[],
+      cleanedBaseUrl?: string,
     ) => Promise<string>;
     exportCanvasToJpeg: (canvas: HTMLCanvasElement, quality?: number, filename?: string) => void;
     onClose: () => void;
@@ -90,6 +93,12 @@
   const rawDisplaySrc = $derived(rawImageUrl || originalSrc);
 
   function getInitialToolbarPosition(): { x: number; y: number } {
+    // Live image display rect (the wrapper is glued to the image), so a
+    // reset after re-layout or scroll lands on the image, not its mount-time
+    // snapshot.
+    const liveRect = wrapper.getBoundingClientRect();
+    const imageRect =
+      liveRect.width > 0 && liveRect.height > 0 ? liveRect : targetImageRect;
     try {
       const saved = localStorage.getItem("lmt-toolbar-pos");
       if (saved) {
@@ -104,16 +113,57 @@
     } catch {}
 
     // Default to Bottom-Left of the target manga/viewport
-    const defaultX = Math.max(16, Math.min(window.innerWidth - 380, targetImageRect.left + 20));
+    const defaultX = Math.max(16, Math.min(window.innerWidth - 380, imageRect.left + 20));
     const defaultY = Math.min(
       window.innerHeight - 95,
-      Math.max(80, targetImageRect.bottom - 95)
+      Math.max(80, imageRect.bottom - 95)
     );
     return { x: defaultX, y: defaultY };
   }
 
+  /**
+   * Clamp a dragged refining-toolbar position so it stays inside the image
+   * display; when the toolbar cannot fit inside it at all, hold the default
+   * position instead.
+   */
+  function clampToolbarInsideDisplay(next: { x: number; y: number }): { x: number; y: number } {
+    const rect = toolbarDragStart?.rect;
+    const display = wrapper.getBoundingClientRect();
+    if (!rect || display.width <= 0 || display.height <= 0) return next;
+    const pad = 8;
+    const minX = display.left + pad;
+    const maxX = display.right - pad - rect.width;
+    const minY = display.top + pad;
+    const maxY = display.bottom - pad - rect.height;
+    if (maxX < minX || maxY < minY) return getInitialToolbarPosition();
+    return {
+      x: Math.max(minX, Math.min(maxX, next.x)),
+      y: Math.max(minY, Math.min(maxY, next.y)),
+    };
+  }
+
+  /**
+   * Render-time fallback for the refining toolbar: if it rendered outside the
+   * image display (stale saved position, re-layout, scroll), return it to the
+   * default position and refresh the stored value.
+   */
+  function resetToolbarPosition() {
+    const def = getInitialToolbarPosition();
+    if (toolbarPosition.x === def.x && toolbarPosition.y === def.y) return;
+    toolbarPosition = def;
+    try {
+      localStorage.setItem("lmt-toolbar-pos", JSON.stringify(def));
+    } catch {}
+  }
+
   let toolbarPosition = $state(getInitialToolbarPosition());
-  let toolbarDragStart = $state<{ startX: number; startY: number; initialX: number; initialY: number } | null>(null);
+  let toolbarDragStart = $state<{
+    startX: number;
+    startY: number;
+    initialX: number;
+    initialY: number;
+    rect: DOMRect | null;
+  } | null>(null);
   let readingDirection = $state<"rtl" | "ltr">("rtl");
   let mode = $state<"loading" | "refining" | "results" | "editing">("loading");
   let activeEditorLayer = $state<EditorLayer>("inpainted");
@@ -128,6 +178,14 @@
   let showOriginal = $state(false);
   let translations = $state<Translations>([]);
   let sourceTexts = $state<string[]>([]);
+  /**
+   * Boxes the recognizer failed or half-read on the last page run. They are
+   * the boxes whose bubble shows nothing and, before this, could not be
+   * retried without re-running the whole page.
+   */
+  let ocrFailures = $state<number[]>([]);
+  /** True when translation settings changed while this overlay was open. */
+  let isStale = $state(false);
   let editDrafts = $state<Translations>([]);
   let previousImageUrl = $state("");
   let activeIndex = $state<number | null>(null);
@@ -143,6 +201,23 @@
   let loadingMsg = $state("Detecting text…");
   let errorMsg = $state("");
   let errorTimer: ReturnType<typeof setTimeout>;
+  let alertId = $state<string | null>(null);
+  /**
+   * True while this page is being translated by the automatic queue. In that
+   * mode the reader is scrolling past pages, so a blocking dialog per failure
+   * is a wall of unclickable modals; failures become toasts instead
+   * (LMT-034). A manual run still deserves a dialog the user must acknowledge.
+   */
+  let autoMode = $state(false);
+
+  // A dismissed/closing overlay must not leave its dialog behind: the alert
+  // host outlives this component, so its Retry/Dismiss callbacks would fire
+  // against destroyed state (LMT-034).
+  $effect(() => {
+    return () => {
+      if (alertId) dismissAlert(alertId);
+    };
+  });
 
   function generateBoxId(): string {
     return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -290,6 +365,11 @@
         );
       }
 
+      // A successful OCR re-read clears the failure marker for this box.
+      if (!skipOcr) {
+        ocrFailures = ocrFailures.filter((k) => k !== targetIndex);
+      }
+
       const successMsg = skipOcr
         ? `Box #${targetIndex + 1} retranslated from captured text. Press Apply to save.`
         : `Box #${targetIndex + 1} retranslated (OCR re-read). Press Apply to save.`;
@@ -329,16 +409,81 @@
     localStorage.setItem("lmt-reading-direction", readingDirection);
   });
 
-  function showError(msg: string) {
+  /**
+   * Report a failure to the user.
+   *
+   * Manual runs get the document-level dialog: the user asked for this page and
+   * is looking at it, so the error must stay until acknowledged. Automatic runs
+   * get a toast, because the reader is scrolling and a modal per failed page is
+   * unclickable noise; the queue caps the retries and pauses after a streak
+   * (LMT-034).
+   *
+   * `onRetry` is only wired when the failure is genuinely transient
+   * (429/5xx/network); a bad API key must not offer a button that cannot work.
+   */
+  function showError(
+    msg: string,
+    opts?: {
+      transient?: boolean;
+      onRetry?: () => void;
+      /**
+       * `false` for a non-failure advisory ("no text bubbles here"): it must
+       * not spend the auto queue's retry budget or count towards pausing.
+       */
+      report?: boolean;
+    },
+  ) {
     clearTimeout(errorTimer);
     errorMsg = msg;
+
+    // Tell the queue a page failed, whether or not a dialog is shown, so the
+    // retry budget is spent and a provider outage pauses the run.
+    if (opts?.report !== false) {
+      document.dispatchEvent(
+        new CustomEvent("lmt:translation-failure", {
+          detail: { src: originalSrc, message: msg },
+        }),
+      );
+    }
+
+    if (autoMode) {
+      // A toast, not a dialog: the queue's attempt budget and the pause rule
+      // are the real safety net here, and they live in auto-translate.ts.
+      // Close the overlay too — an auto run the user did not start must not
+      // leave a spinner or an empty editor pinned over the page.
+      errorMsg = "";
+      pushNotice(msg, opts?.transient ? "warn" : "error", 7000);
+      // Deferred: the caller is still unwinding its own error path.
+      setTimeout(() => onClose(), 0);
+      return;
+    }
+
+    alertId = `alert-${crypto.randomUUID?.() ?? Date.now()}`;
+    showAlert({
+      id: alertId,
+      message: msg,
+      kind: "error",
+      transient: opts?.transient ?? false,
+      onRetry: opts?.onRetry,
+      onDismiss: handleErrorDismiss,
+    });
     if (ERROR_AUTOCLOSE) {
-      errorTimer = setTimeout(() => (errorMsg = ""), 5000);
+      errorTimer = setTimeout(() => {
+        dismissAlert(alertId ?? undefined);
+        errorMsg = "";
+      }, 5000);
     }
   }
 
-  async function handleErrorDismiss() {
+  function clearError() {
+    clearTimeout(errorTimer);
+    if (alertId) dismissAlert(alertId);
+    alertId = null;
     errorMsg = "";
+  }
+
+  async function handleErrorDismiss() {
+    clearError();
     const skip =
       await storage.getItem<boolean>("sync:skip-bbox-refining");
     if (skip ?? false) {
@@ -349,6 +494,17 @@
     // drop to refining so the user can draw boxes manually.
     mode = "refining";
     Registry.markIdle(originalSrc);
+  }
+
+  /** Run a failed translate again from the alert's Retry button. */
+  function retryTranslation() {
+    clearError();
+    if (!bboxes.length) {
+      mode = "refining";
+      Registry.markIdle(originalSrc);
+      return;
+    }
+    void executeTranslation();
   }
 
 function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
@@ -447,6 +603,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
   }
 
   async function executeTranslation() {
+    isStale = false;
     mode = "loading";
     applyBboxesSort();
 
@@ -514,13 +671,20 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     );
     if (typeof result === "object" && "error" in result) {
       mode = "refining";
-      showError(result.error);
+      // A provider hiccup deserves a Retry button; a wrong key or a bad model
+      // name does not (LMT-034).
+      const transient = result.transient === true;
+      showError(result.error, {
+        transient,
+        onRetry: transient ? retryTranslation : undefined,
+      });
       Registry.markIdle(originalSrc);
       return;
     }
 
     translations = result.translations ?? [];
     sourceTexts = result.sourceTexts ?? [];
+    ocrFailures = result.ocrFailures ?? [];
 
     const echoed = result.diagnostics?.untranslated?.length ?? 0;
     if (echoed > 0) {
@@ -528,6 +692,14 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
         `${echoed} box${echoed === 1 ? "" : "es"} echoed the source and ${
           echoed === 1 ? "was" : "were"
         } left untranslated.`,
+        "warn",
+      );
+    }
+
+    if (ocrFailures.length > 0) {
+      addToast(
+        `${ocrFailures.length} bubble${ocrFailures.length === 1 ? "" : "s"} could not be read ` +
+          `(OCR). Use "Retry OCR" on the marked bubble${ocrFailures.length === 1 ? "" : "s"}.`,
         "warn",
       );
     }
@@ -560,6 +732,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     return executeTranslation();
   }
 
+  let snapshotCleanedUrl = "";
   async function openEditPanel() {
     if (mode !== "results") return;
     editDrafts = translations.slice();
@@ -575,6 +748,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
         console.warn("LMT: Could not fetch cleaned background image", err);
       }
     }
+    snapshotCleanedUrl = cleanedUrl;
     activeEditorLayer = "inpainted";
     activeInpaintTool = "none";
     inpaintPatches = [];
@@ -584,24 +758,35 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     }
   }
 
+  async function applyPendingInpaintPatches(): Promise<string | undefined> {
+    if (inpaintPatches.length === 0 || !applyInpaintPatches) return cleanedUrl;
+    isApplyingInpaint = true;
+    const added = inpaintPatches
+      .filter((p) => p.type === "add-inpaint")
+      .map((p) => ({ x1: p.x1, y1: p.y1, x2: p.x2, y2: p.y2, confidence: 1 }));
+    const removed = inpaintPatches
+      .filter((p) => p.type === "restore-raw")
+      .map((p) => ({ x1: p.x1, y1: p.y1, x2: p.x2, y2: p.y2, confidence: 1 }));
+    try {
+      cleanedUrl = await applyInpaintPatches(cleanedUrl || rawDisplaySrc, added, removed);
+      inpaintPatches = [];
+      return cleanedUrl;
+    } catch (err) {
+      // A manual edit failure is not a page-translation failure: reporting it
+      // would spend the auto queue's retry budget for this page (LMT-034).
+      showError("Failed to apply inpaint patches: " + (err as Error).message, {
+        report: false,
+      });
+      return undefined;
+    } finally {
+      isApplyingInpaint = false;
+    }
+  }
+
   async function applyEditorChanges() {
     // 1. If inpaint patches exist, apply them to the cleaned canvas
-    if (inpaintPatches.length > 0 && applyInpaintPatches) {
-      isApplyingInpaint = true;
-      const added = inpaintPatches
-        .filter((p) => p.type === "add-inpaint")
-        .map((p) => ({ x1: p.x1, y1: p.y1, x2: p.x2, y2: p.y2, confidence: 1 }));
-      const removed = inpaintPatches
-        .filter((p) => p.type === "restore-raw")
-        .map((p) => ({ x1: p.x1, y1: p.y1, x2: p.x2, y2: p.y2, confidence: 1 }));
-      try {
-        cleanedUrl = await applyInpaintPatches(cleanedUrl || rawDisplaySrc, added, removed);
-        inpaintPatches = [];
-      } catch (err) {
-        showError("Failed to apply inpaint patches: " + (err as Error).message);
-      } finally {
-        isApplyingInpaint = false;
-      }
+    if (inpaintPatches.length > 0) {
+      await applyPendingInpaintPatches();
     }
 
     // 2. Commit text edits & repaint
@@ -612,11 +797,15 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       translatedUrl = await renderTranslations(
         $state.snapshot(translations),
         $state.snapshot(bboxes),
+        cleanedUrl || undefined,
       );
+      snapshotCleanedUrl = cleanedUrl;
       mode = "results";
     } catch (err) {
       mode = "editing";
-      showError((err as Error).message);
+      // A render failure in the editor is a local canvas problem, not a page
+      // translation attempt: do not charge it to the auto queue (LMT-034).
+      showError((err as Error).message, { report: false });
     }
   }
 
@@ -624,6 +813,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     editDrafts = translations.slice();
     inpaintPatches = [];
     activeInpaintTool = "none";
+    cleanedUrl = snapshotCleanedUrl;
     mode = "results";
   }
 
@@ -642,12 +832,14 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     });
     forcingIndex = null;
     if (typeof result === "object" && "error" in result) {
-      showError(result.error);
+      // `transient: true` here means "don't log this attempt": the per-box
+      // retry shares the page's failure surface, not the debug log.
+      showError(result.error, { report: false });
       return;
     }
     const text = result.translations?.[0];
     if (!text) {
-      showError("Nothing readable in that box");
+      showError("Nothing readable in that box", { report: false });
       return;
     }
     bboxes[i].gateSkip = undefined;
@@ -661,9 +853,10 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       translatedUrl = await renderTranslations(
         $state.snapshot(translations),
         $state.snapshot(bboxes),
+        cleanedUrl || undefined,
       );
     } catch (err) {
-      showError((err as Error).message);
+      showError((err as Error).message, { report: false });
     }
   }
 
@@ -828,6 +1021,15 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
   }
 
   onMount(async () => {
+    // Read the mode before detection: a failure during detection must already
+    // know whether a blocking dialog is appropriate (LMT-034).
+    const [skipRefining, autoTranslate, currentMode] = await Promise.all([
+      storage.getItem<boolean>("sync:skip-bbox-refining"),
+      storage.getItem<boolean>("sync:auto-translate"),
+      storage.getItem<string>("sync:current-mode"),
+    ]);
+    autoMode = autoTranslate ?? false;
+
     const initialCache = await getTranslationCache();
 
     const rawBboxes = initialCache
@@ -845,7 +1047,11 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     }
 
     if (rawBboxes.length === 0) {
-      showError("No text bubbles detected - add boxes manually");
+      // Not a provider failure: an empty page is a normal outcome, so it must
+      // not spend the auto queue's retry budget.
+      showError("No text bubbles detected - add boxes manually", {
+        report: false,
+      });
     }
 
     // Filter out invalid/phantom boxes (NaN coords, zero or negative area)
@@ -877,11 +1083,6 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       cleanedUrl = initialCache.cleanedSrc ?? "";
       Registry.markDone(originalSrc);
     } else {
-      const [skipRefining, autoTranslate, currentMode] = await Promise.all([
-        storage.getItem<boolean>("sync:skip-bbox-refining"),
-        storage.getItem<boolean>("sync:auto-translate"),
-        storage.getItem<string>("sync:current-mode"),
-      ]);
       // Gemini transcribes and translates the whole page itself, answering one
       // item per numbered box, so manual box review adds a click without changing
       // what is uploaded. Zero boxes still opens the editor — there is nothing to
@@ -936,7 +1137,10 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       e.stopPropagation();
       e.preventDefault();
       if (errorMsg) {
-        handleErrorDismiss();
+        // The dialog is dismissible from its own host too; going through the
+        // shared alert id keeps both surfaces in sync (LMT-034).
+        if (alertId) dismissAlert(alertId);
+        void handleErrorDismiss();
       } else if (mode === "editing") {
         cancelEditorChanges();
       } else if (activeIndex !== null) {
@@ -1018,14 +1222,14 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       e.preventDefault();
 
       requestAnimationFrame(() => {
-        // Toolbar drag
+        // Toolbar drag — clamped to the image display bounds
         if (toolbarDragStart) {
           const dx = e.clientX - toolbarDragStart.startX;
           const dy = e.clientY - toolbarDragStart.startY;
-          toolbarPosition = {
-            x: Math.max(10, Math.min(window.innerWidth - 320, toolbarDragStart.initialX + dx)),
-            y: Math.max(10, Math.min(window.innerHeight - 80, toolbarDragStart.initialY + dy)),
-          };
+          toolbarPosition = clampToolbarInsideDisplay({
+            x: toolbarDragStart.initialX + dx,
+            y: toolbarDragStart.initialY + dy,
+          });
           return;
         }
 
@@ -1134,11 +1338,20 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       }
     };
 
+    const handleSettingsChanged = () => {
+      isStale = true;
+      addToast(
+        "Settings changed since translation was made. Use Re-translate to apply.",
+        "info",
+      );
+    };
+
     wrapper.addEventListener("lmt:back-to-refine", handleBackToRefine);
     wrapper.addEventListener("lmt:open-edit", handleOpenEdit);
     wrapper.addEventListener("lmt:toggle-original", handleToggleOriginal);
     wrapper.addEventListener("lmt:export-jpeg", handleExport);
     wrapper.addEventListener("lmt:geometry-change", handleGeometryChange);
+    wrapper.addEventListener("lmt:settings-changed", handleSettingsChanged);
 
     return () => {
       if (mode === "refining" || mode === "editing")
@@ -1151,6 +1364,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       wrapper.removeEventListener("lmt:toggle-original", handleToggleOriginal);
       wrapper.removeEventListener("lmt:export-jpeg", handleExport);
       wrapper.removeEventListener("lmt:geometry-change", handleGeometryChange);
+      wrapper.removeEventListener("lmt:settings-changed", handleSettingsChanged);
     };
   });
 
@@ -1176,13 +1390,14 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     if (wrapper) {
       wrapper.setAttribute("data-lmt-mode", mode);
       wrapper.setAttribute("data-lmt-progress", loadingMsg);
+      // Only the wrapper we own gets a z-index (LMT-034). Writing it onto
+      // `wrapper.parentElement` turned a page-owned layout node into a
+      // stacking context: on MangaOne that reordered the spread and let a
+      // neighbouring page's transparent tap layer cover this overlay's UI.
+      // A parent z-index was also never restored, so one refining pass left
+      // the page permanently restyled.
       const isInteractive = mode === "refining" || mode === "editing";
-      const zVal = isInteractive ? (isWrapperHovered ? "60" : "50") : "";
-      wrapper.style.zIndex = zVal;
-      const parent = wrapper.parentElement;
-      if (parent) {
-        parent.style.zIndex = zVal;
-      }
+      wrapper.style.zIndex = isInteractive ? (isWrapperHovered ? "60" : "50") : "";
       wrapper.dispatchEvent(
         new CustomEvent("lmt:mode-change", { detail: { mode }, bubbles: true }),
       );
@@ -1253,11 +1468,15 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       isDraggingToolbar={toolbarDragStart !== null}
       {readingDirection}
       onDragStart={(e) => {
+        const root = (e.currentTarget as HTMLElement | null)?.closest(
+          "[data-lmt-toolbar]",
+        );
         toolbarDragStart = {
           startX: e.clientX,
           startY: e.clientY,
           initialX: toolbarPosition.x,
           initialY: toolbarPosition.y,
+          rect: root instanceof HTMLElement ? root.getBoundingClientRect() : null,
         };
       }}
       onAddBox={addBox}
@@ -1268,6 +1487,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       onConfirm={handleConfirm}
       onUndo={undo}
       onRedo={redo}
+      onResetPosition={resetToolbarPosition}
       onClose={() => {
         if (previousImageUrl) {
           translatedUrl = previousImageUrl;
@@ -1323,6 +1543,31 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
             </button>
           </div>
         {/if}
+        {#if ocrFailures.includes(i) && !translations[i]}
+          <div
+            class="absolute border-2 border-dashed border-rose-500/90 rounded-sm pointer-events-none z-30"
+            style:left="{box.x1 * liveScaleX}px"
+            style:top="{box.y1 * liveScaleY}px"
+            style:width="{(box.x2 - box.x1) * liveScaleX}px"
+            style:height="{(box.y2 - box.y1) * liveScaleY}px"
+          >
+            <button
+              type="button"
+              onclick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                void handleRetranslateBox(i, false);
+              }}
+              onmousedown={(e) => e.stopPropagation()}
+              onpointerdown={(e) => e.stopPropagation()}
+              disabled={isRetranslatingBox(i)}
+              title="The OCR engine could not read this bubble. Retry re-runs recognition on the same box."
+              class="pointer-events-auto absolute bottom-1 left-1/2 -translate-x-1/2 bg-rose-500/95 hover:bg-rose-400 disabled:opacity-60 text-white text-xs font-semibold px-2 py-0.5 rounded shadow whitespace-nowrap cursor-pointer transition-colors"
+            >
+              {isRetranslatingBox(i) ? "Retrying..." : "Retry OCR"}
+            </button>
+          </div>
+        {/if}
         {#if box.inpaintDeclined && (!box.gateSkip || translations[i])}
           <div
             class="absolute border-2 border-dotted border-rose-500/80 rounded-sm pointer-events-none z-30"
@@ -1355,6 +1600,8 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     <OverlayToolbar
       mode="results"
       {showOriginal}
+      {isStale}
+      onRetranslate={executeTranslation}
       onRefine={handleBackToRefine}
       onEditTranslations={openEditPanel}
       onExportJpg={saveJpg}
@@ -1414,7 +1661,10 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       hasActiveBox={activeIndex !== null}
       pendingPatchCount={inpaintPatches.length}
       isApplying={isApplyingInpaint}
-      onSelectLayer={(layer) => {
+      onSelectLayer={async (layer) => {
+        if (activeEditorLayer === "cleaned" && layer !== "cleaned" && inpaintPatches.length > 0) {
+          await applyPendingInpaintPatches();
+        }
         activeEditorLayer = layer;
         if (layer !== "cleaned") activeInpaintTool = "none";
       }}
@@ -1428,50 +1678,6 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
   {/if}
 
   <Toasts {toasts} onDismiss={dismissToast} />
-  
-  {#if errorMsg}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-    <div
-      class="absolute inset-0 flex items-center justify-center z-70 bg-black/60 backdrop-blur-sm pointer-events-auto select-none cursor-pointer"
-      onclick={(e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        handleErrorDismiss();
-      }}
-      onmousedown={(e) => e.stopPropagation()}
-      onpointerdown={(e) => e.stopPropagation()}
-      role="alert"
-    >
-      <div
-        role="presentation"
-        class="flex flex-col items-center gap-3 bg-[#121a26]/95 border border-rose-500/50 rounded-[6px] shadow-[0_8px_32px_rgba(0,0,0,0.8),0_0_16px_rgba(244,63,94,0.25)] px-6 py-5 max-w-[85%] text-center backdrop-blur-md cursor-default"
-        onclick={(e) => {
-          e.stopPropagation();
-          e.preventDefault();
-        }}
-        onmousedown={(e) => e.stopPropagation()}
-        onpointerdown={(e) => e.stopPropagation()}
-        onkeydown={(e) => e.stopPropagation()}
-      >
-        <TriangleAlert size={28} class="text-rose-400 shrink-0" />
-        <p class="text-xs font-mono text-rose-200 leading-relaxed max-h-40 overflow-y-auto custom-scrollbar">{errorMsg}</p>
-        <button
-          type="button"
-          onclick={(e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            handleErrorDismiss();
-          }}
-          onmousedown={(e) => e.stopPropagation()}
-          onpointerdown={(e) => e.stopPropagation()}
-          class="mt-1 px-3 py-1 rounded-[3px] bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-xs font-mono border border-rose-500/40 cursor-pointer transition-colors"
-        >
-          Dismiss
-        </button>
-      </div>
-    </div>
-  {/if}
 </div>
 
 <style>

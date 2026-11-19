@@ -9,6 +9,7 @@
     Plus,
     Palette,
   } from "lucide-svelte";
+  import { clampOffsetInside, isRectOutside, overlayDisplayEl } from "./bounds";
 
   interface Props {
     boxIndex?: number;
@@ -31,6 +32,7 @@
   let isDragging = $state(false);
   let dragStart = { x: 0, y: 0, initialOffsetX: 0, initialOffsetY: 0 };
   let showColorMenu = $state(false);
+  let barEl: HTMLDivElement | undefined = $state(undefined);
 
   // Reset custom drag offset whenever active box index changes
   $effect(() => {
@@ -39,6 +41,88 @@
     offsetY = 0;
     showColorMenu = false;
   });
+
+  /**
+   * When the bar renders, check whether it sits outside the image display
+   * (e.g. dragged below a box near the image bottom edge); if it does,
+   * return to the default anchored position.
+   */
+  function ensureInsideDisplay(): void {
+    const el = barEl;
+    const displayEl = overlayDisplayEl(el);
+    if (!(el instanceof HTMLDivElement) || !displayEl) return;
+    const rect = el.getBoundingClientRect();
+    const display = displayEl.getBoundingClientRect();
+    if (!isRectOutside(rect, display)) return;
+    if (offsetX !== 0 || offsetY !== 0) {
+      offsetX = 0;
+      offsetY = 0;
+    }
+  }
+
+  // Check on every render (offset changes re-run it).
+  $effect(() => {
+    void offsetX;
+    void offsetY;
+    ensureInsideDisplay();
+  });
+
+  // Re-check when the bar or the image display itself is resized.
+  $effect(() => {
+    const el = barEl;
+    const displayEl = overlayDisplayEl(el);
+    if (!(el instanceof HTMLDivElement) || !displayEl) return;
+    const observer = new ResizeObserver(() => ensureInsideDisplay());
+    observer.observe(displayEl);
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
+
+  function handleMouseDown(e: MouseEvent) {
+    e.stopPropagation();
+    e.preventDefault();
+    isDragging = true;
+    dragStart = {
+      x: e.clientX,
+      y: e.clientY,
+      initialOffsetX: offsetX,
+      initialOffsetY: offsetY,
+    };
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const rect =
+        barEl instanceof HTMLDivElement ? barEl.getBoundingClientRect() : null;
+      const display = overlayDisplayEl(barEl)?.getBoundingClientRect() ?? null;
+      const next = {
+        x: dragStart.initialOffsetX + (moveEvent.clientX - dragStart.x),
+        y: dragStart.initialOffsetY + (moveEvent.clientY - dragStart.y),
+      };
+      if (rect && display) {
+        // Keep the bar inside the image display while dragging; if it
+        // cannot fit at all, fall back to the default anchored position.
+        const clamped = clampOffsetInside(
+          rect,
+          display,
+          { x: offsetX, y: offsetY },
+          next,
+        );
+        offsetX = clamped?.x ?? 0;
+        offsetY = clamped?.y ?? 0;
+      } else {
+        offsetX = next.x;
+        offsetY = next.y;
+      }
+    };
+
+    const handleMouseUp = () => {
+      isDragging = false;
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+  }
 
   const currentSize = $derived(style?.fontSize ?? 0); // 0 means auto
   const isBold = $derived(!!style?.bold);
@@ -70,32 +154,6 @@
     }
   }
 
-  function handleMouseDown(e: MouseEvent) {
-    e.stopPropagation();
-    e.preventDefault();
-    isDragging = true;
-    dragStart = {
-      x: e.clientX,
-      y: e.clientY,
-      initialOffsetX: offsetX,
-      initialOffsetY: offsetY,
-    };
-
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      offsetX = dragStart.initialOffsetX + (moveEvent.clientX - dragStart.x);
-      offsetY = dragStart.initialOffsetY + (moveEvent.clientY - dragStart.y);
-    };
-
-    const handleMouseUp = () => {
-      isDragging = false;
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
-    };
-
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
-  }
-
   function updateStyle(patch: Partial<TextStyle>) {
     onChange({
       ...style,
@@ -120,6 +178,7 @@
 
 <!-- Draggable Contextual Typography Toolbar -->
 <div
+  bind:this={barEl}
   role="toolbar"
   tabindex={-1}
   class="absolute z-60 pointer-events-auto select-none flex items-center gap-1 p-1 rounded-[5px]

@@ -7,6 +7,37 @@ export type TranslateFn = (img: MangaTargetElement) => Promise<void>;
 
 export const MANUAL_CONCURRENCY = 3;
 
+/**
+ * A page is dispatched at most this many times by the auto queue (LMT-034).
+ * Without a cap, a provider outage produced an endless
+ * fail → idle → rescan → enqueue loop: every cycle spent a slot, churned
+ * `lmt:translation-status` events, and (through the old per-page modal)
+ * replaced the error dialog the user was aiming at.
+ */
+export const MAX_AUTO_ATTEMPTS = 2;
+
+/** Consecutive page failures that pause automatic work. */
+export const MAX_CONSECUTIVE_FAILURES = 3;
+
+/**
+ * Event the overlay dispatches when its pipeline fails.
+ *
+ * The overlay owns the message (it is the only place that knows whether the
+ * failure came from detection, translation or rendering), and decides how to
+ * show it: a dismissible dialog for a manual run, a toast once the page is
+ * auto-translating and the reader is scrolling past it. The queue listens only
+ * to spend the retry budget and to decide when to stop hammering a provider.
+ */
+export interface TranslationFailureDetail {
+  src: string;
+  message: string;
+}
+
+export interface AutoTranslateCallbacks {
+  /** Automatic work stopped after a run of failures. */
+  onQueuePaused?: (failedPages: number) => void;
+}
+
 export class AutoTranslateQueue {
   private queue: { img: MangaTargetElement; fn: TranslateFn }[] = [];
   // Slots are held for the full pipeline lifetime and released on the
@@ -18,28 +49,68 @@ export class AutoTranslateQueue {
   private seenKeys = new Set<string>();
   private lastTranslateFn: TranslateFn | null = null;
   private statusListener: ((e: Event) => void) | null = null;
+  private failureListener: ((e: Event) => void) | null = null;
+  /** srcKey → attempts spent since the last success (LMT-034). */
+  private attempts = new Map<string, number>();
+  /** Pages whose budget is gone: they wait for the user, not for a rescan. */
+  private failed = new Set<string>();
+  /** srcKey → failure message awaiting the trailing `idle` event. */
+  private pendingFailure = new Map<string, string>();
+  /** Pages dispatched by the observer rather than by a user click. */
+  private autoInFlight = new Set<string>();
+  private consecutiveFailures = 0;
+  private paused = false;
 
-  constructor() {
+  constructor(private callbacks: AutoTranslateCallbacks = {}) {
     this.statusListener = (e: Event) => {
       const detail = (e as CustomEvent<{ src?: string; status?: string }>)
         .detail;
       if (!detail || !detail.src) return;
       if (detail.status !== "done" && detail.status !== "idle") return;
       const k = Registry.srcKeyOf(detail.src);
-      if (detail.status === "idle") {
-        // Failure/close/error → allow retry via pill or rescan.
-        // Must run even when the slot was already released on `done`:
-        // done keeps seenKeys (anti-requeue while overlay is open), and the
-        // close path fires idle after inFlight was deleted — without this,
-        // the pill's second click is silently dropped by seenKeys forever.
+
+      if (detail.status === "done") {
+        // A clean page clears its budget and the failure streak: the provider
+        // is healthy again, so a paused queue may resume.
+        this.attempts.delete(k);
+        this.pendingFailure.delete(k);
+        this.autoInFlight.delete(k);
+        this.consecutiveFailures = 0;
+        this.paused = false;
+        this.inFlight.delete(k);
+        // done → keep seenKeys so finished pages never requeue.
+        if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
+        return;
+      }
+
+      // idle: the pipeline ended. Only a page that also emitted a failure
+      // event is charged — closing the overlay by hand is not a failure.
+      const message = this.pendingFailure.get(k);
+      this.pendingFailure.delete(k);
+      if (message !== undefined) {
+        this.settleFailure(k, message);
+      } else if (!this.failed.has(k)) {
         this.seenKeys.delete(k);
       }
-      if (!this.inFlight.has(k)) return;
+      this.autoInFlight.delete(k);
       this.inFlight.delete(k);
-      // done → keep seenKeys so finished pages never requeue.
       if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
     };
     document.addEventListener("lmt:translation-status", this.statusListener);
+
+    this.failureListener = (e: Event) => {
+      const detail = (e as CustomEvent<TranslationFailureDetail>).detail;
+      if (!detail?.src) return;
+      this.pendingFailure.set(
+        Registry.srcKeyOf(detail.src),
+        detail.message || "Translation failed",
+      );
+    };
+    document.addEventListener("lmt:translation-failure", this.failureListener);
+  }
+
+  setCallbacks(callbacks: AutoTranslateCallbacks) {
+    this.callbacks = callbacks;
   }
 
   destroy() {
@@ -49,6 +120,13 @@ export class AutoTranslateQueue {
         this.statusListener,
       );
       this.statusListener = null;
+    }
+    if (this.failureListener) {
+      document.removeEventListener(
+        "lmt:translation-failure",
+        this.failureListener,
+      );
+      this.failureListener = null;
     }
   }
 
@@ -65,11 +143,49 @@ export class AutoTranslateQueue {
     return this.concurrency;
   }
 
+  /** True when automatic work stopped after a run of failures. */
+  isPaused() {
+    return this.paused;
+  }
+
+  get failedCount() {
+    return this.failed.size;
+  }
+
+  hasFailed(img: MangaTargetElement): boolean {
+    const src = getElementSrc(img);
+    return src ? this.failed.has(Registry.srcKeyOf(src)) : false;
+  }
+
+  /** Clear the failure budget for one page — used by an explicit user retry. */
+  clearFailure(img: MangaTargetElement) {
+    const src = getElementSrc(img);
+    if (!src) return;
+    const k = Registry.srcKeyOf(src);
+    this.failed.delete(k);
+    this.attempts.delete(k);
+    this.pendingFailure.delete(k);
+  }
+
+  /** Clear every failure budget and resume automatic work. */
+  resume() {
+    this.failed.clear();
+    this.attempts.clear();
+    this.pendingFailure.clear();
+    this.consecutiveFailures = 0;
+    this.paused = false;
+    if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
+  }
+
   evict(img: MangaTargetElement) {
     const src = getElementSrc(img);
     if (!src) return;
     const k = Registry.srcKeyOf(src);
     this.seenKeys.delete(k);
+    this.attempts.delete(k);
+    this.failed.delete(k);
+    this.pendingFailure.delete(k);
+    this.autoInFlight.delete(k);
     if (this.inFlight.delete(k) && this.lastTranslateFn) {
       this.drain(this.lastTranslateFn);
     }
@@ -78,6 +194,8 @@ export class AutoTranslateQueue {
   enqueue(
     img: MangaTargetElement,
     translateFn: (img: MangaTargetElement) => Promise<void>,
+    /** `false` for a user click: it must not feed the auto pause counter. */
+    automatic = true,
   ) {
     const src = getElementSrc(img);
     if (!src) return;
@@ -91,12 +209,54 @@ export class AutoTranslateQueue {
     )
       return;
     this.seenKeys.add(k);
+    if (automatic) this.autoInFlight.add(k);
     this.queue.push({ img, fn: translateFn });
     this.lastTranslateFn = translateFn;
     this.drain(translateFn);
   }
 
+  /**
+   * Charge one failure against a page: silently retry while it has budget
+   * left, then park it until the user asks again. A run of consecutive
+   * automatic failures stops the whole queue.
+   */
+  private settleFailure(k: string, _message: string) {
+    const attempt = this.attempts.get(k) ?? 0;
+
+    // A manual run is the user insisting: it must not consume the automatic
+    // budget or push the queue towards its pause threshold (LMT-034). It does
+    // park the page, though — otherwise the very next DOM mutation would
+    // re-enqueue the page the user just watched fail, and the modal would
+    // reappear on its own.
+    if (!this.autoInFlight.has(k)) {
+      this.attempts.delete(k);
+      this.failed.add(k);
+      this.seenKeys.delete(k);
+      return;
+    }
+
+    if (attempt >= MAX_AUTO_ATTEMPTS) {
+      this.failed.add(k);
+      this.seenKeys.delete(k);
+    } else {
+      // Silent retry: a later mutation/rescan may dispatch this page again.
+      this.seenKeys.delete(k);
+    }
+
+    this.consecutiveFailures += 1;
+
+    if (
+      this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES &&
+      !this.paused
+    ) {
+      this.paused = true;
+      this.clear();
+      this.callbacks.onQueuePaused?.(this.failed.size);
+    }
+  }
+
   private drain(translateFn: (img: MangaTargetElement) => Promise<void>) {
+    if (this.paused) return;
     while (this.inFlight.size < this.concurrency && this.queue.length > 0) {
       const entry = this.queue.shift()!;
       const targetImg = entry.img;
@@ -115,12 +275,20 @@ export class AutoTranslateQueue {
         this.seenKeys.delete(k);
         continue;
       }
+      // A page whose budget is gone must not be dispatched by a rescan.
+      if (this.failed.has(k)) {
+        this.seenKeys.delete(k);
+        continue;
+      }
 
+      this.attempts.set(k, (this.attempts.get(k) ?? 0) + 1);
       this.inFlight.add(k);
       // Fire-and-forget: translateFn sets up its own overlay and async
       // flow. Failure or done signals through the registry event above.
       translateFn(targetImg)
         .then(() => {
+          // The overlay mounted and owns the rest of the pipeline; nothing to
+          // settle here unless it bailed before ever opening.
           if (!Registry.isPending(k) && Registry.getStatus(k) !== "done") {
             this.inFlight.delete(k);
             this.seenKeys.delete(k);
@@ -129,9 +297,13 @@ export class AutoTranslateQueue {
           }
         })
         .catch((err) => {
+          // Failed before the overlay existed (detection/mount throw): no
+          // failure event was dispatched, so settle it here.
           console.warn("LMT: auto-translate task failed:", err);
+          this.settleFailure(k, (err as Error)?.message ?? String(err));
+          this.pendingFailure.delete(k);
+          this.autoInFlight.delete(k);
           this.inFlight.delete(k);
-          this.seenKeys.delete(k);
           Registry.markIdle(src);
           if (this.lastTranslateFn) this.drain(this.lastTranslateFn);
         });
@@ -166,8 +338,12 @@ export class AutoTranslateOrchestrator {
   private unwatchStorage: (() => void) | null = null;
   private unwatchConcurrency: (() => void) | null = null;
 
-  async init(translateFn: (img: MangaTargetElement) => Promise<void>) {
+  async init(
+    translateFn: (img: MangaTargetElement) => Promise<void>,
+    callbacks: AutoTranslateCallbacks = {},
+  ) {
     this.translateFn = translateFn;
+    this.queue.setCallbacks(callbacks);
 
     await this.applyCap();
     const initialEnabled =
@@ -182,6 +358,9 @@ export class AutoTranslateOrchestrator {
         if (newVal) {
           // Cap first so the rescan drains at the slider value, not stale 3.
           await this.applyCap();
+          // Turning auto ON is an explicit request to try the failed pages
+          // again, so the budget resets here and only here.
+          this.queue.resume();
           this.start();
         } else {
           this.stop();
@@ -201,9 +380,22 @@ export class AutoTranslateOrchestrator {
 
   /** Manual pill path: shares the same queue even when auto is off. */
   enqueueManual(img: MangaTargetElement) {
+    // An explicit user click always overrides an earlier failure.
+    this.queue.clearFailure(img);
     if (this.translateFn) {
-      this.queue.enqueue(img, this.translateFn);
+      // `automatic: false` — a manual run must not push the queue towards its
+      // automatic pause threshold (LMT-034).
+      this.queue.enqueue(img, this.translateFn, false);
     }
+  }
+
+  /** User asked to try every failed page again. */
+  retryFailed() {
+    this.queue.resume();
+  }
+
+  isPaused() {
+    return this.queue.isPaused();
   }
 
   /** Unified cap: slider 1..10 when auto ON, absolute 3 when OFF. */
@@ -323,6 +515,9 @@ export class AutoTranslateOrchestrator {
     if (!src) return;
     const k = Registry.srcKeyOf(src);
     if (Registry.isPending(k) || Registry.getStatus(k) === "done") return;
+    // A page whose attempts are gone waits for the user, not for the next DOM
+    // mutation to re-enqueue it (LMT-034).
+    if (this.queue.hasFailed(img)) return;
 
     const isReady =
       img instanceof HTMLCanvasElement
@@ -340,6 +535,7 @@ export class AutoTranslateOrchestrator {
         if (!this.isEnabled) return;
         const kk = Registry.srcKeyOf(getElementSrc(img));
         if (Registry.isPending(kk) || Registry.getStatus(kk) === "done") return;
+        if (this.queue.hasFailed(img)) return;
         if (this.isQualifyingImage(img)) {
           this.observedImages.add(img);
           this.observer?.observe(img);

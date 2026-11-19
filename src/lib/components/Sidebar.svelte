@@ -13,8 +13,11 @@ import { onDestroy } from "svelte";
     LoaderCircle,
     HardDrive,
     Compass,
+    CircleAlert,
+    ExternalLink,
   } from "lucide-svelte";
-  import { DefaultConfig, defaultLlmModelId, llmModelDef, normalizeLlmModel, normalizeDetectionModel, resolveLangGroup } from "@/lib/configs";
+  import { type AppUpdateInfo, APP_UPDATE_CACHE_KEY } from "@/lib/app-version";
+  import { DefaultConfig, defaultLlmModelId, llmModelDef, normalizeDetectionModel, normalizeLlmModel, resolveLangGroup } from "@/lib/configs";
   import { normalizeInpaintMethod } from "@/lib/inpaint/ladder";
   import { openSetupTab } from "@/lib/utils";
   import DetectionSettings from "./settings/DetectionSettings.svelte";
@@ -26,6 +29,7 @@ import { onDestroy } from "svelte";
   import DebugPanel from "./settings/DebugPanel.svelte";
   import InpaintSettings from "./settings/InpaintSettings.svelte";
   import ModelStorageSettings from "./settings/ModelStorageSettings.svelte";
+  import PageCacheSettings from "./settings/PageCacheSettings.svelte";
   import ModelUpdateChecker from "./settings/ModelUpdateChecker.svelte";
   import GpuAccelerationPanel from "./settings/GpuAccelerationPanel.svelte";
   import { getSiteRule } from "@/lib/adapters";
@@ -38,6 +42,7 @@ import { onDestroy } from "svelte";
   let isOpen = $state(false);
   let activeSection = $state<string>("pipeline");
   const manifestVersion = (browser.runtime.getManifest() as any).version_name || browser.runtime.getManifest().version;
+  let updateInfo = $state<AppUpdateInfo | null>(null);
 
   let currentMode = $state(DefaultConfig.currentMode);
   let sourceLang = $state(DefaultConfig.sourceLang);
@@ -54,6 +59,8 @@ import { onDestroy } from "svelte";
   let serverHost = $state(DefaultConfig.serverHost);
   let serverSchema = $state(DefaultConfig.serverSchema);
   let serverModel = $state(DefaultConfig.serverModel);
+  let serverNumCtx = $state(DefaultConfig.serverNumCtx);
+  let serverDisableThinking = $state(DefaultConfig.serverDisableThinking);
   let useServerApiKey = $state(DefaultConfig.useServerApiKey);
   let serverApiKey = $state(DefaultConfig.serverApiKey);
   let geminiKey = $state("");
@@ -188,6 +195,8 @@ import { onDestroy } from "svelte";
         "local:server-host",
         "local:server-schema",
         "local:server-model",
+        "local:server-num-ctx",
+        "local:server-disable-thinking",
         "local:use-server-api-key",
         "local:server-api-key",
         "sync:custom-site-rules",
@@ -220,6 +229,9 @@ import { onDestroy } from "svelte";
       serverHost = saved["local:server-host"] ?? serverHost;
       serverSchema = saved["local:server-schema"] ?? serverSchema;
       serverModel = saved["local:server-model"] ?? serverModel;
+      serverNumCtx = saved["local:server-num-ctx"] ?? serverNumCtx;
+      serverDisableThinking =
+        saved["local:server-disable-thinking"] ?? serverDisableThinking;
       useServerApiKey = saved["local:use-server-api-key"] ?? useServerApiKey;
       serverApiKey = saved["local:server-api-key"] ?? serverApiKey;
       customRules = saved["sync:custom-site-rules"] ?? customRules;
@@ -270,6 +282,8 @@ import { onDestroy } from "svelte";
       { key: "local:server-host", value: serverHost },
       { key: "local:server-schema", value: serverSchema },
       { key: "local:server-model", value: serverModel },
+      { key: "local:server-num-ctx", value: serverNumCtx },
+      { key: "local:server-disable-thinking", value: serverDisableThinking },
       { key: "local:use-server-api-key", value: useServerApiKey },
       { key: "local:server-api-key", value: serverApiKey },
       { key: "sync:custom-site-rules", value: $state.snapshot(customRules) },
@@ -387,8 +401,27 @@ import { onDestroy } from "svelte";
     activeDropdown = null;
   }
 
+  async function checkAppUpdate() {
+    try {
+      const cached = await storage.getItem<AppUpdateInfo>(APP_UPDATE_CACHE_KEY);
+      if (cached?.hasUpdate) updateInfo = cached;
+    } catch {}
+
+    try {
+      const res = await browser.runtime.sendMessage({ type: "CHECK_APP_UPDATE" });
+      if (res && typeof res.hasUpdate === "boolean") {
+        updateInfo = res;
+      }
+    } catch (err) {
+      console.debug("LMT: failed to check app update:", err);
+    }
+  }
+
   $effect(() => {
-    if (isOpen) loadSettings();
+    if (isOpen) {
+      loadSettings();
+      checkAppUpdate();
+    }
   });
 
   $effect(() => {
@@ -554,6 +587,8 @@ import { onDestroy } from "svelte";
                   bind:serverHost
                   bind:serverSchema
                   bind:serverModel
+                  bind:serverNumCtx
+                  bind:serverDisableThinking
                   bind:useServerApiKey
                   bind:serverApiKey
                   bind:geminiKey
@@ -710,6 +745,8 @@ import { onDestroy } from "svelte";
 
             <ModelStorageSettings />
 
+            <PageCacheSettings />
+
             <!-- Site Rules -->
             <div class="panel-card !p-2.5 flex flex-col gap-2">
               <span class="kicker">Site rules</span>
@@ -727,6 +764,31 @@ import { onDestroy } from "svelte";
                 {serverApiKey}
               />
             </div>
+
+            <!-- New Version Alert Card -->
+            {#if updateInfo?.hasUpdate}
+              <div class="panel-card !p-2.5 flex flex-col gap-2 border-[var(--accent-amber)]/40 bg-[var(--accent-amber-soft)]/20">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-1.5 min-w-0">
+                    <CircleAlert size={14} class="text-[var(--accent-amber)] shrink-0" />
+                    <span class="text-xs font-medium text-[var(--text-primary)]">Update available</span>
+                  </div>
+                  <span class="badge-cyber is-amber text-[10px]">v{updateInfo.latestVersion}</span>
+                </div>
+                <p class="text-[10px] text-[var(--text-muted)] leading-snug">
+                  Version {updateInfo.latestVersion} is out (current: v{manifestVersion}). Review release notes and download the update on GitHub.
+                </p>
+                <a
+                  href={updateInfo.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn-ghost w-full justify-center py-1.5 text-xs font-bold font-display text-[var(--accent-amber)] border-[var(--accent-amber)]/40 hover:bg-[var(--accent-amber-soft)] hover:border-[var(--accent-amber)] transition-colors flex items-center gap-1.5"
+                >
+                  <ExternalLink size={12} />
+                  Open GitHub Release
+                </a>
+              </div>
+            {/if}
 
             <!-- Retrigger Onboarding Card -->
             <div class="panel-card !p-2.5 flex flex-col gap-2">

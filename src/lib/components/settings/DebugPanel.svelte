@@ -438,7 +438,14 @@
               {#if log.llmCalls || log.promptChars || log.finishReason}
                 <div class="col-span-2 text-[10px] font-mono text-zinc-500">
                   {#if log.llmCalls}{log.llmCalls} call{log.llmCalls === 1 ? "" : "s"} ·{/if}
-                  {#if log.promptChars}{log.promptChars} prompt chars ·{/if}
+                  {#if log.promptTokens}
+                    ~{log.promptTokens} prompt tok (est) ·
+                  {:else if log.promptChars}
+                    {log.promptChars} prompt chars ·
+                  {/if}
+                  {#if log.numCtx}ctx {log.numCtx} ·{/if}
+                  {#if log.promptEvalCount}server counted {log.promptEvalCount} ·{/if}
+                  {#if log.thinkingDisabled}thinking off ·{/if}
                   finish: {log.finishReason ?? "unknown"}
                   {#if log.truncated}
                     · <span class="text-red-400">truncated</span>
@@ -446,6 +453,16 @@
                   {#if log.padded}
                     · <span class="text-red-400">padded</span>
                   {/if}
+                </div>
+              {/if}
+              {#if log.budgetLevel === "over" || log.budgetLevel === "warn"}
+                <div
+                  class="col-span-2 text-[10px] font-mono {log.budgetLevel === 'over'
+                    ? 'text-red-400'
+                    : 'text-amber-500'}"
+                  title="Prompt size vs the requested context window"
+                >
+                  {log.budgetLevel === "over" ? "Prompt does not fit" : "Prompt nearly full"}: {log.budgetWarning}
                 </div>
               {/if}
               {#if log.rawResponse}

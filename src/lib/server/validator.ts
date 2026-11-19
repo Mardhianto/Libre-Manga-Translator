@@ -9,9 +9,10 @@
  * bubble.
  *
  * Every accepted result carries diagnostics. `untranslated` marks boxes whose
- * output echoes the source (exact match, or ≥50% source-script share when the
- * source and target scripts are disjoint), and `maskUntranslated()` turns
- * those slots into "" so the renderer leaves the original pixels alone.
+ * output cannot be a translation of the input: empty output for non-empty
+ * source, an exact echo, a wrong-language answer, or source-script
+ * contamination. `maskUntranslated()` turns those slots into "" so the
+ * renderer leaves the original pixels alone.
  */
 
 import {
@@ -93,6 +94,18 @@ export interface LlmRunInfo {
   promptChars?: number;
   /** LLM requests spent on this page (format fallbacks + correction round). */
   llmCalls?: number;
+  /** Estimated prompt tokens (LMT-024). */
+  promptTokens?: number;
+  /** The server's own prompt count - the ground truth for the estimate. */
+  promptEvalCount?: number;
+  /** Context window the request asked for; native Ollama only. */
+  numCtx?: number;
+  /** True when the request actually carried `think:false` / `reasoning_effort`. */
+  thinkingDisabled?: boolean;
+  /** Prompt-size verdict: ok / warn / over. */
+  budgetLevel?: "ok" | "warn" | "over";
+  /** Why the prompt will not fit, when it will not. */
+  budgetWarning?: string;
 }
 
 /** Raw answers are capped before they reach storage: 50 debug entries × a
@@ -137,12 +150,21 @@ export function isTruncatedFinishReason(
 export function mergeRunInfo(calls: LlmRunInfo[]): LlmRunInfo {
   if (calls.length === 0) return {};
   const last = calls[calls.length - 1];
+  const first = calls[0];
   return {
     rawResponse: last.rawResponse,
     finishReason: last.finishReason,
     // The first call's prompt is the page's baseline; the correction prompt is
     // longer and would overstate what a normal page costs.
-    promptChars: calls[0].promptChars,
+    promptChars: first.promptChars,
+    promptTokens: first.promptTokens,
+    promptEvalCount: last.promptEvalCount ?? first.promptEvalCount,
+    // Request knobs come from the first answered call: a format fallback
+    // re-sends the same window, so the last one is not more truthful.
+    numCtx: first.numCtx,
+    thinkingDisabled: first.thinkingDisabled,
+    budgetLevel: first.budgetLevel,
+    budgetWarning: first.budgetWarning,
     llmCalls: calls.length,
   };
 }
@@ -302,6 +324,12 @@ export function validateTranslationResult(
             finishReason: run.finishReason,
             promptChars: run.promptChars,
             llmCalls: run.llmCalls,
+            promptTokens: run.promptTokens,
+            promptEvalCount: run.promptEvalCount,
+            numCtx: run.numCtx,
+            thinkingDisabled: run.thinkingDisabled,
+            budgetLevel: run.budgetLevel,
+            budgetWarning: run.budgetWarning,
             truncated: isTruncatedFinishReason(run.finishReason),
             // This validator never invents entries; the flag exists so the
             // Debug export can prove that in one line (LMT-032).
@@ -609,7 +637,13 @@ function findUntranslated(
   for (let i = 0; i < translations.length; i++) {
     const source = sourceTexts[i] ?? "";
     const output = translations[i] ?? "";
-    if (!source.trim() || !output.trim()) continue;
+    // Nothing was asked for this box (no OCR text, or the gate held it back).
+    if (!source.trim()) continue;
+    if (!output.trim()) {
+      // Text went in and nothing came back: the model dropped this box.
+      flagged.push(i);
+      continue;
+    }
 
     const normalizedSource = normalizeForEcho(source);
     const normalizedOutput = normalizeForEcho(output);
@@ -625,8 +659,26 @@ function findUntranslated(
     const sourceClasses = sourceClassesFor(source, sourceLang);
     if (!sourceClasses) continue;
     if (sourceClasses.some((cls) => targetClasses.includes(cls))) continue;
+
+    // Wrong language: every dominant class is neither the target nor the
+    // source. Catches an English answer to a Korean page.
+    const dominant = dominantClasses(output);
+    if (
+      dominant?.length &&
+      dominant.every(
+        (cls) =>
+          !targetClasses.includes(cls) && !sourceClasses.includes(cls),
+      )
+    ) {
+      flagged.push(i);
+      continue;
+    }
+
+    // Contamination: one stranded kana in a Korean line is the reported
+    // `っ`. 0.15 is deliberately below "a whole word": the measured case
+    // "아! 뭐가 달라 っ!?" is 1 of 6 countable characters (0.167).
     if ([...normalizedOutput].length < 2) continue;
-    if (classShare(output, sourceClasses) >= 0.5) {
+    if (classShare(output, sourceClasses) >= 0.15) {
       flagged.push(i);
     }
   }

@@ -1,6 +1,11 @@
 import Overlay from "@/lib/components/Overlay.svelte";
 import Sidebar from "@/lib/components/Sidebar.svelte";
 import FloatingTrigger from "@/lib/components/FloatingTrigger.svelte";
+import AlertHost from "@/lib/components/overlay/AlertHost.svelte";
+import {
+  dismissAllAlerts,
+  pushNotice,
+} from "@/lib/components/overlay/alerts";
 import { AutoTranslateOrchestrator } from "./auto-translate";
 import * as Registry from "./translation-registry";
 import { mount, unmount } from "svelte";
@@ -32,6 +37,11 @@ import {
   syncContextKey,
   updateSeriesContext,
 } from "@/lib/series-context-store";
+import {
+  buildFingerprint,
+  readCurrentFingerprint,
+  isCacheValid,
+} from "@/lib/cache/page-cache";
 import "@/assets/app.css";
 
 const srcKey = (src: string) =>
@@ -50,6 +60,12 @@ function runDiagnosticFields(d?: TranslationDiagnostics) {
     llmCalls: d?.llmCalls,
     finishReason: d?.finishReason,
     promptChars: d?.promptChars,
+    promptTokens: d?.promptTokens,
+    promptEvalCount: d?.promptEvalCount,
+    numCtx: d?.numCtx,
+    thinkingDisabled: d?.thinkingDisabled,
+    budgetLevel: d?.budgetLevel,
+    budgetWarning: d?.budgetWarning,
     padded: d?.padded,
     truncated: d?.truncated,
   };
@@ -106,8 +122,11 @@ async function captureTaintedCanvas(
       return null;
     }
 
+    // Hide our own chrome before the screenshot: the capture is a viewport
+    // grab, so any overlay, error dialog or toast that happens to sit over the
+    // page ends up baked into the translated image (LMT-034).
     const floatingHosts = document.querySelectorAll<HTMLElement>(
-      "lmt-floating-trigger, lmt-sidebar",
+      "lmt-floating-trigger, lmt-sidebar, lmt-alert, lmt-overlay",
     );
     const prevVisibility: string[] = [];
     floatingHosts.forEach((h, i) => {
@@ -170,7 +189,7 @@ export default defineContentScript({
     const translatedSrcMap = new Map<string, string>();
     const inpaintedSrcCache = new Map<
       string,
-      { url: string; boxesKey: string }
+      { url: string; boxesKey: string; isManual?: boolean }
     >(); // inpainted base images, keyed to the exact set of painted boxes
     const debugEntryIdBySrc = new Map<string, string>(); // src → last debug entry id
     const overlays = new Map<
@@ -178,6 +197,33 @@ export default defineContentScript({
       { ui: ShadowRootContentScriptUi<any>; wrapper: HTMLElement }
     >();
     let lastDetectMs: number | undefined = undefined;
+
+    const WATCHED_SETTINGS = [
+      "sync:source-lang",
+      "sync:target-lang",
+      "sync:ocr-engine",
+      "sync:ocr-min-confidence",
+      "sync:llm-model",
+      "sync:llm-temperature",
+      "sync:detection-model",
+      "local:server-model",
+      "sync:gemini-model",
+      "sync:current-mode",
+    ] as const;
+
+    const unwatchFns = WATCHED_SETTINGS.map((key) =>
+      storage.watch(key, () => {
+        for (const [src, overlay] of overlays) {
+          Registry.markIdle(src);
+          overlay.wrapper.dispatchEvent(new CustomEvent("lmt:settings-changed"));
+        }
+      }),
+    );
+    ctx.onInvalidated(() => {
+      for (const unwatch of unwatchFns) {
+        unwatch();
+      }
+    });
 
     // Mount independent sidebar shadow UI
     createShadowRootUi(ctx, {
@@ -195,6 +241,26 @@ export default defineContentScript({
     }).then((ui) => {
       ui.mount();
     });
+
+    // Document-level error channel (LMT-034). Deliberately its own shadow root
+    // on <body>, so no per-page overlay stacking context can cover it and one
+    // missed click can never strand the reader.
+    createShadowRootUi(ctx, {
+      name: "lmt-alert",
+      position: "inline",
+      anchor: "body",
+      append: "last",
+      onMount: (uiContainer) =>
+        mount(AlertHost, {
+          target: uiContainer,
+        }),
+      onRemove: (app) => {
+        if (app) unmount(app);
+      },
+    }).then((ui) => {
+      ui.mount();
+    });
+    ctx.onInvalidated(() => dismissAllAlerts());
 
     async function startTranslationPipeline(imgElement: MangaTargetElement) {
       if (!imgElement || !document.body.contains(imgElement)) return;
@@ -357,15 +423,39 @@ export default defineContentScript({
                 rawImageUrl: src,
 
                 getTranslationCache: async () => {
+                  const currentFp = await readCurrentFingerprint();
                   const cache = await storage.getItem<PageCache>(
                     `local:${await translationKey()}`,
                   );
-                  if (!cache) return;
-                  const translatedSrc = await repaintWithTranslations(
-                    src,
-                    cache.bboxes,
-                    cache.translations,
-                  );
+                  if (!isCacheValid(cache, currentFp)) return;
+                  let translatedSrc: string;
+                  if (cache.cleanedSrc) {
+                    translatedSrc = await drawTranslations(
+                      cache.cleanedSrc,
+                      cache.bboxes,
+                      cache.translations,
+                    );
+                    inpaintedSrcCache.set(src, {
+                      url: cache.cleanedSrc,
+                      boxesKey: JSON.stringify(
+                        cache.bboxes
+                          .filter((_, i) => cache.translations[i])
+                          .map((b) => [
+                            Math.round(b.x1),
+                            Math.round(b.y1),
+                            Math.round(b.x2),
+                            Math.round(b.y2),
+                          ]),
+                      ),
+                      isManual: true,
+                    });
+                  } else {
+                    translatedSrc = await repaintWithTranslations(
+                      src,
+                      cache.bboxes,
+                      cache.translations,
+                    );
+                  }
                   translatedSrcMap.set(srcKey(translatedSrc), originalSrc);
                   return {
                     bboxes: cache.bboxes,
@@ -425,6 +515,7 @@ export default defineContentScript({
                     "sync:target-lang",
                     "local:active-device",
                     "sync:ocr-min-confidence",
+                    "sync:ocr-engine",
                     "sync:detection-min-confidence",
                     "sync:llm-temperature",
                     "local:server-schema",
@@ -450,6 +541,15 @@ export default defineContentScript({
                     seriesContext.lastChapterId === chapterId &&
                     seriesContext.lastPageIndex !== null &&
                     resolvedPage === seriesContext.lastPageIndex + 1;
+
+                  // Re-running the page we just translated is not a
+                  // discontinuity (LMT-031): `isContinuous` is false for it,
+                  // and passing that through as `resetHistory` wiped every
+                  // other page's history on a Refine -> Translate.
+                  const isSamePage =
+                    seriesContext.lastChapterId === chapterId &&
+                    seriesContext.lastPageIndex !== null &&
+                    resolvedPage === seriesContext.lastPageIndex;
 
                   const curMode =
                     (cfg["sync:current-mode"] as string | undefined) ??
@@ -492,6 +592,8 @@ export default defineContentScript({
                     "local:server-model",
                     "local:use-server-api-key",
                     "local:server-api-key",
+                    "local:server-num-ctx",
+                    "local:server-disable-thinking",
                     "sync:script-gate",
                   ]);
                   const runtime = Object.fromEntries(
@@ -523,6 +625,12 @@ export default defineContentScript({
                       serverModel: runtime["local:server-model"] as string | undefined,
                       useServerApiKey: runtime["local:use-server-api-key"] as boolean | undefined,
                       serverApiKey: runtime["local:server-api-key"] as string | undefined,
+                      serverNumCtx:
+                        (runtime["local:server-num-ctx"] as number | undefined) ??
+                        DefaultConfig.serverNumCtx,
+                      serverDisableThinking:
+                        (runtime["local:server-disable-thinking"] as boolean | undefined) ??
+                        DefaultConfig.serverDisableThinking,
                       scriptGate:
                         (runtime["sync:script-gate"] as boolean | undefined) ??
                         DefaultConfig.scriptGate,
@@ -582,6 +690,10 @@ export default defineContentScript({
 
                   const { translations, context, sourceTexts, gateSkip, gate, llmPerf, gpuUnavailableReason, diagnostics } =
                     resp;
+                  // Boxes the recognizer failed or half-read. Hoisted above the
+                  // debug entry because the entry reports them, and above the
+                  // cache write because they outrank the validator's verdict.
+                  const ocrFailures: number[] = resp.ocrFailures ?? [];
                   // Echoed boxes keep the original pixels: masking them to ""
                   // means the renderer neither inpaints nor paints them.
                   const visibleTranslations = maskUntranslated(
@@ -635,6 +747,9 @@ export default defineContentScript({
                       sourceTexts,
                       translations,
                       untranslated: diagnostics?.untranslated,
+                      // Boxes the recognizer failed or half-read. Distinct
+                      // from `untranslated`: the model never saw the text.
+                      ocrFailures,
                       ...runDiagnosticFields(diagnostics),
                     timing,
                     ...(curMode === "webgpu" && llmPerf
@@ -673,7 +788,10 @@ export default defineContentScript({
                   // context. A padded/echoed page keeps its debug entry (that
                   // is the whole point of the log) but must not poison the
                   // next prompt or resurrect echoed lines from cache.
-                  if (isCleanResult(diagnostics)) {
+                  // OCR failures outrank the validator: a box the recognizer
+                  // could not read reaches the model as "", which the
+                  // validator has no way to call dirty.
+                  if (isCleanResult(diagnostics, ocrFailures)) {
                     const cacheKey = await translationKey();
                     storage
                       .setItem<PageCache>(`local:${cacheKey}`, {
@@ -682,6 +800,7 @@ export default defineContentScript({
                         // resurrect an echoed source line.
                         translations: visibleTranslations,
                         sourceTexts,
+                        fingerprint: buildFingerprint({ ...cfg, ...runtime }),
                       })
                       .catch((err) => console.warn("LMT: page-cache persist failed:", err));
 
@@ -692,18 +811,18 @@ export default defineContentScript({
                       // Never feed an echoed source line into the next prompt.
                       visibleTranslations,
                       context,
-                      { resetHistory: !isContinuous, diagnostics },
+                      { resetHistory: !isContinuous && !isSamePage, diagnostics },
                     ).catch((err) => console.warn("LMT: series-context update failed:", err));
                   } else {
                     console.warn(
-                      `LMT: ${diagnostics?.untranslated?.length ?? 0} untranslated box(es) on ${
-                        seriesName ? `"${seriesName}" ` : ""
-                      }page ${resolvedPage}; cache/context not saved.`,
+                      `LMT: ${diagnostics?.untranslated?.length ?? 0} untranslated box(es)` +
+                        `${ocrFailures.length ? `, ${ocrFailures.length} OCR failure(s)` : ""}` +
+                        ` on ${seriesName ? `"${seriesName}" ` : ""}page ${resolvedPage}; cache/context not saved.`,
                     );
                   }
                   }
 
-                  return { translations: visibleTranslations, sourceTexts, context, gateSkip, gate, diagnostics };
+                  return { translations: visibleTranslations, sourceTexts, context, gateSkip, gate, diagnostics, ocrFailures };
                 },
 
                 // Re-render translations on top of the (cached) inpainted base.
@@ -711,6 +830,7 @@ export default defineContentScript({
                 renderTranslations: async (
                   translations: Translations,
                   bboxes: Bbox[],
+                  cleanedBaseUrl?: string,
                 ) => {
                   // Only regions we actually paint get inpainted: a gate-skipped
                   // or empty region keeps its original text untouched (erasing
@@ -731,7 +851,13 @@ export default defineContentScript({
                     | "fallback"
                     | undefined;
                   let inpaintMs: number | undefined;
-                  if (!cached || cached.boxesKey !== boxesKey) {
+
+                  if (cleanedBaseUrl) {
+                    cached = { url: cleanedBaseUrl, boxesKey, isManual: true };
+                    inpaintedSrcCache.set(src, cached);
+                  } else if (cached?.isManual) {
+                    cached.boxesKey = boxesKey;
+                  } else if (!cached || cached.boxesKey !== boxesKey) {
                     const tInpaint = performance.now();
                     const res = await inpaintImage(src, paintable);
                     inpaintMs = performance.now() - tInpaint;
@@ -833,6 +959,8 @@ export default defineContentScript({
                         translations,
                         bboxes,
                         cleanedSrc: cached?.url,
+                        fingerprint:
+                          cache.fingerprint ?? (await readCurrentFingerprint()),
                       },
                     );
                   }
@@ -845,7 +973,15 @@ export default defineContentScript({
                   if (cached?.url) return cached.url;
                   const boxes = currentBboxes ?? [];
                   const res = await inpaintImage(src, boxes);
-                  cached = { url: res.url, boxesKey: "" };
+                  const boxesKey = JSON.stringify(
+                    boxes.map((b) => [
+                      Math.round(b.x1),
+                      Math.round(b.y1),
+                      Math.round(b.x2),
+                      Math.round(b.y2),
+                    ]),
+                  );
+                  cached = { url: res.url, boxesKey };
                   inpaintedSrcCache.set(src, cached);
                   return res.url;
                 },
@@ -895,7 +1031,7 @@ export default defineContentScript({
                   }
 
                   // Update cache
-                  inpaintedSrcCache.set(src, { url: currentDataUrl, boxesKey: "" });
+                  inpaintedSrcCache.set(src, { url: currentDataUrl, boxesKey: "", isManual: true });
                   return currentDataUrl;
                 },
 
@@ -954,7 +1090,18 @@ export default defineContentScript({
     // Created before the pill so manual clicks enqueue through the same
     // limiter: slider cap when auto is ON, absolute 3 when OFF.
     const autoTranslator = new AutoTranslateOrchestrator();
-    autoTranslator.init(startTranslationPipeline);
+    // The overlay owns the message for a single failed page (dialog for a
+    // manual run, toast while auto-translating). The queue only owns the
+    // retry budget and the decision to stop when a provider is clearly down
+    // (LMT-034) — that decision is announced here, once.
+    autoTranslator.init(startTranslationPipeline, {
+      onQueuePaused: (failedPages) =>
+        pushNotice(
+          `Auto-translate paused after repeated failures (${failedPages} page${failedPages === 1 ? "" : "s"}). Toggle auto-translate off and on to retry.`,
+          "error",
+          0,
+        ),
+    });
     ctx.onInvalidated(() => autoTranslator.destroy());
 
     // ── Floating Hover Trigger ──────────────────────────────────────────

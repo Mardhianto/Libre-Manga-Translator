@@ -18,8 +18,11 @@ import {
   capSeriesContext,
   createEmptySeriesContext,
   isCleanResult,
+  isPageRecorded,
+  isSamePagePosition,
   seriesContextFromStored,
   toSyncPart,
+  upsertHistoryEntry,
   type SeriesContextSyncPart,
 } from "./series-context";
 
@@ -152,6 +155,11 @@ function enqueue<T>(seriesName: string, task: () => Promise<T>): Promise<T> {
  * the next clean page stays "continuous" — otherwise one echoed box would
  * silently wipe the whole history buffer via the reset path. It just refuses
  * to append history, bump the counter, or accept model-written settings.
+ *
+ * Re-running a page that is already recorded (LMT-031) is treated as an update:
+ * the counter does not advance, its history entry is replaced in place, and the
+ * `resetHistory` request is ignored — "same page" is not a discontinuity, even
+ * though the caller derives `resetHistory` from "is this the next page?".
  */
 export async function updateSeriesContext(
   seriesName: string,
@@ -179,6 +187,13 @@ async function writeSeriesContext(
 
   const current = await loadSeriesContext(seriesName);
 
+  // A re-run of the page we just finished is not a discontinuity (LMT-031).
+  // `resetHistory` is derived from "is this the next page?", which is false
+  // for the current page, so without this a Refine -> Translate on page 5
+  // wiped pages 1-4 out of the history buffer.
+  const samePage = isSamePagePosition(current, chapterId, pageIndex);
+  const alreadyRecorded = isPageRecorded(current, chapterId, pageIndex);
+
   const next = capSeriesContext({
     ...current,
     lastChapterId: chapterId,
@@ -189,8 +204,14 @@ async function writeSeriesContext(
     dictionary: clean
       ? (context?.dictionary ?? current.dictionary)
       : current.dictionary,
-    translatedCount: clean ? current.translatedCount + 1 : current.translatedCount,
-    recentHistory: resetHistory ? [] : current.recentHistory,
+    // Only a page that has not been counted before advances the counter.
+    // It gates the summary/dictionary refresh cadence (`prompts.ts`), so a
+    // re-run must not desynchronise it (LMT-031).
+    translatedCount:
+      clean && !alreadyRecorded
+        ? current.translatedCount + 1
+        : current.translatedCount,
+    recentHistory: resetHistory && !samePage ? [] : current.recentHistory,
   });
 
   if (clean) {
@@ -198,12 +219,15 @@ async function writeSeriesContext(
       .filter((t) => typeof t === "string" && t.trim().length > 0)
       .join(" | ");
     if (text) {
+      // Upsert, not append: a re-run must replace this page's entry rather
+      // than add a duplicate that would evict an older page (LMT-031).
       next.recentHistory = capSeriesContext({
         ...next,
-        recentHistory: [
-          ...next.recentHistory,
-          { chapterId, pageIndex, text },
-        ],
+        recentHistory: upsertHistoryEntry(next.recentHistory, {
+          chapterId,
+          pageIndex,
+          text,
+        }),
       }).recentHistory;
     }
   }

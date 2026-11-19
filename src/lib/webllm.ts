@@ -11,7 +11,12 @@ import {
   promptChars,
   validateTranslationResult,
   type LlmRunInfo,
+  type ValidatedTranslation,
 } from "./server/validator";
+import {
+  keepBetterTranslation,
+  untranslatedCorrectionPrompt,
+} from "./server/correction";
 
 let globalEngine: MLCEngine | null = null;
 let currentlyLoadedModel: string | null = null;
@@ -162,13 +167,26 @@ async function translateLocalUncounted(
     perf ? { ...result, llmPerf: perf } : result;
 
   try {
+    const validated = validateTranslationResult(raw, ocrResults.length, {
+      sourceTexts: ocrResults,
+      sourceLang,
+      targetLang,
+      run: mergeRunInfo(calls),
+    });
     return withPerf(
-      validateTranslationResult(raw, ocrResults.length, {
-        sourceTexts: ocrResults,
+      await correctUntranslatedLocal(
+        validated,
+        systemPrompt,
+        userPrompt,
+        schema,
+        resolvedModel,
+        temperature,
+        ocrResults,
         sourceLang,
         targetLang,
-        run: mergeRunInfo(calls),
-      }),
+        calls,
+        signal,
+      ),
     );
   } catch (error) {
     if (!isTranslationValidationError(error)) throw error;
@@ -198,6 +216,58 @@ async function translateLocalUncounted(
     } catch (retryError) {
       throw attachDiagnostics(retryError, mergeRunInfo(calls));
     }
+  }
+}
+
+/**
+ * One correction round for boxes the validator refused (C3). The page parsed
+ * and every box has an entry, so this is not the format-failure path above:
+ * the model simply left some boxes empty, echoed, or in the wrong language.
+ *
+ * Never loops. A correction that flags more boxes is a regression and is
+ * discarded, and a failed correction round keeps the first answer: the page
+ * is already valid, so polish must not turn it into an error.
+ */
+async function correctUntranslatedLocal(
+  first: ValidatedTranslation,
+  systemPrompt: string,
+  userPrompt: string,
+  schema: object,
+  resolvedModel: string,
+  temperature: number,
+  ocrResults: string[],
+  sourceLang: string,
+  targetLang: string,
+  calls: LlmRunInfo[],
+  signal?: AbortSignal,
+): Promise<ValidatedTranslation> {
+  const flagged = first.diagnostics.untranslated;
+  if (flagged.length === 0) return first;
+
+  try {
+    const correctionPrompt = untranslatedCorrectionPrompt(flagged);
+    const corrected = await runLLMModel(
+      systemPrompt,
+      `${userPrompt}\n\nCORRECTION: ${correctionPrompt}\nReturn the full corrected JSON now.`,
+      schema,
+      resolvedModel,
+      temperature,
+      signal,
+    );
+    calls.push(corrected.info);
+    const second = validateTranslationResult(corrected.data, ocrResults.length, {
+      sourceTexts: ocrResults,
+      sourceLang,
+      targetLang,
+      run: mergeRunInfo(calls),
+    });
+    return keepBetterTranslation(first, second);
+  } catch (error) {
+    console.warn(
+      `[webllm] untranslated correction failed — keeping the first answer:`,
+      error,
+    );
+    return first;
   }
 }
 

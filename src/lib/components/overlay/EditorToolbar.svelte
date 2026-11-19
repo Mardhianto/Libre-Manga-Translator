@@ -13,6 +13,7 @@
     X,
     LoaderCircle,
   } from "lucide-svelte";
+  import { clampOffsetInside, isRectOutside, overlayDisplayEl } from "./bounds";
 
   export type EditorLayer = "raw" | "cleaned" | "inpainted";
   export type InpaintTool = "none" | "mark-inpaint" | "restore-raw";
@@ -47,10 +48,56 @@
     onCancel,
   }: Props = $props();
 
+  let toolbarEl: HTMLDivElement | undefined = $state(undefined);
   let offsetY = $state(0);
   let isDragging = $state(false);
   let dragStartY = 0;
   let initialOffsetY = 0;
+
+  /**
+   * Keep a dragged offset inside the image display. The toolbar is centred
+   * vertically by default (`top-1/2 -translate-y-1/2`), so `offsetY` is the
+   * signed distance from that centre.
+   */
+  function clampOffsetToDisplay(offset: number): number {
+    const rect =
+      toolbarEl instanceof HTMLDivElement ? toolbarEl.getBoundingClientRect() : null;
+    const display = overlayDisplayEl(toolbarEl)?.getBoundingClientRect() ?? null;
+    if (!rect || !display) return offset;
+    const clamped = clampOffsetInside(rect, display, { x: 0, y: offsetY }, { x: 0, y: offset });
+    // Toolbar is taller than the display itself — no valid offset, stay
+    // centred (the default position).
+    return clamped?.y ?? 0;
+  }
+
+  /**
+   * When the toolbar is rendered, check whether it sits outside the image
+   * display (e.g. dragged away, or grown past a short image by the inpaint
+   * group appearing); if it does, return to the default centred position.
+   */
+  function resetIfOutsideDisplay(): void {
+    const rect =
+      toolbarEl instanceof HTMLDivElement ? toolbarEl.getBoundingClientRect() : null;
+    const display = overlayDisplayEl(toolbarEl)?.getBoundingClientRect() ?? null;
+    if (!rect || !display) return;
+    if (isRectOutside(rect, display)) offsetY = 0;
+  }
+
+  // Check on every render that changes the toolbar's geometry (switching to
+  // the cleaned layer adds the inpaint group) and whenever the image display
+  // or the toolbar itself is resized afterwards.
+  $effect(() => {
+    void activeLayer;
+    void pendingPatchCount;
+    const el = toolbarEl;
+    resetIfOutsideDisplay();
+    const displayEl = overlayDisplayEl(el);
+    if (!(el instanceof HTMLDivElement) || !displayEl) return;
+    const observer = new ResizeObserver(() => resetIfOutsideDisplay());
+    observer.observe(displayEl);
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
 
   function handleDragStart(e: MouseEvent) {
     e.stopPropagation();
@@ -60,7 +107,7 @@
     initialOffsetY = offsetY;
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
-      offsetY = initialOffsetY + (moveEvent.clientY - dragStartY);
+      offsetY = clampOffsetToDisplay(initialOffsetY + (moveEvent.clientY - dragStartY));
     };
 
     const handleMouseUp = () => {
@@ -90,6 +137,7 @@
 
 <!-- Vertical Floating Toolbar on the Right Edge of the Manga Viewport -->
 <div
+  bind:this={toolbarEl}
   role="toolbar"
   tabindex={-1}
   class="absolute right-3 top-1/2 -translate-y-1/2 z-60 pointer-events-auto select-none
