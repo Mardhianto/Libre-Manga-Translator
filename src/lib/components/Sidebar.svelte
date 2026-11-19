@@ -13,7 +13,10 @@ import { onDestroy } from "svelte";
     LoaderCircle,
     HardDrive,
     Compass,
+    CircleAlert,
+    ExternalLink,
   } from "lucide-svelte";
+  import { type AppUpdateInfo, APP_UPDATE_CACHE_KEY } from "@/lib/app-version";
   import { DefaultConfig, normalizeDetectionModel, normalizeLlmModel, resolveLangGroup } from "@/lib/configs";
   import { normalizeInpaintMethod } from "@/lib/inpaint/ladder";
   import { openSetupTab } from "@/lib/utils";
@@ -39,6 +42,7 @@ import { onDestroy } from "svelte";
   let isOpen = $state(false);
   let activeSection = $state<string>("pipeline");
   const manifestVersion = (browser.runtime.getManifest() as any).version_name || browser.runtime.getManifest().version;
+  let updateInfo = $state<AppUpdateInfo | null>(null);
 
   let currentMode = $state(DefaultConfig.currentMode);
   let sourceLang = $state(DefaultConfig.sourceLang);
@@ -397,8 +401,27 @@ import { onDestroy } from "svelte";
     activeDropdown = null;
   }
 
+  async function checkAppUpdate() {
+    try {
+      const cached = await storage.getItem<AppUpdateInfo>(APP_UPDATE_CACHE_KEY);
+      if (cached?.hasUpdate) updateInfo = cached;
+    } catch {}
+
+    try {
+      const res = await browser.runtime.sendMessage({ type: "CHECK_APP_UPDATE" });
+      if (res && typeof res.hasUpdate === "boolean") {
+        updateInfo = res;
+      }
+    } catch (err) {
+      console.debug("LMT: failed to check app update:", err);
+    }
+  }
+
   $effect(() => {
-    if (isOpen) loadSettings();
+    if (isOpen) {
+      loadSettings();
+      checkAppUpdate();
+    }
   });
 
   $effect(() => {
@@ -741,6 +764,31 @@ import { onDestroy } from "svelte";
                 {serverApiKey}
               />
             </div>
+
+            <!-- New Version Alert Card -->
+            {#if updateInfo?.hasUpdate}
+              <div class="panel-card !p-2.5 flex flex-col gap-2 border-[var(--accent-amber)]/40 bg-[var(--accent-amber-soft)]/20">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-1.5 min-w-0">
+                    <CircleAlert size={14} class="text-[var(--accent-amber)] shrink-0" />
+                    <span class="text-xs font-medium text-[var(--text-primary)]">Update available</span>
+                  </div>
+                  <span class="badge-cyber is-amber text-[10px]">v{updateInfo.latestVersion}</span>
+                </div>
+                <p class="text-[10px] text-[var(--text-muted)] leading-snug">
+                  Version {updateInfo.latestVersion} is out (current: v{manifestVersion}). Review release notes and download the update on GitHub.
+                </p>
+                <a
+                  href={updateInfo.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn-ghost w-full justify-center py-1.5 text-xs font-bold font-display text-[var(--accent-amber)] border-[var(--accent-amber)]/40 hover:bg-[var(--accent-amber-soft)] hover:border-[var(--accent-amber)] transition-colors flex items-center gap-1.5"
+                >
+                  <ExternalLink size={12} />
+                  Open GitHub Release
+                </a>
+              </div>
+            {/if}
 
             <!-- Retrigger Onboarding Card -->
             <div class="panel-card !p-2.5 flex flex-col gap-2">

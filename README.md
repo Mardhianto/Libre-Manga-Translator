@@ -140,7 +140,7 @@ Libre Manga Translator coordinates vision, OCR, translation, and inpainting thro
 - **Full Local Pipeline (Local mode):** Comic Bubble Detector (RT-DETR, default) and Comic Text Detector run via ONNX Runtime Web. PaddleOCR extracts text on-device. Llama-3.2-1B, Qwen3.5-0.8B, Gemma2-2B-JPN, Qwen3.5-2B, Hermes-3-3B, Qwen3.5-4B, Phi-4-mini, or Qwen3.5-9B translates via WebLLM with GPU acceleration. After the initial weights download, the entire workflow operates completely offline.
 - **Cloud Direct (Gemini):** Your browser sends the **whole page image** to Google's Gemini API using your own API key — downscaled to ≤1024 px wide, re-encoded as JPEG at quality 0.75, with each detected region drawn on it as a numbered red box so the model can answer one translation per box — plus any series summary and term dictionary you have stored. It is not a crop, and the full artwork of that page leaves the device; nothing is sent until you pick this mode and paste a key. Best for low-resource hardware without a dedicated GPU, or when you want state-of-the-art multimodal translation accuracy.
 - **API Mode (Self-Hosted):** Connect to your own LLM server running locally or across your LAN/WAN. **Sends extracted text only** — the OCR strings from each box, the target language, and your series context. No page image, and no crop, leaves the device in this mode. Supports Ollama (native `/api/chat`, which can set the context window), LM Studio, vLLM, OpenRouter, Venice AI, and any OpenAI-compatible `/v1/chat/completions` endpoint.
-- **Dual Schema Support:** Seamlessly switch between standard OpenAI JSON (`response_format.json_object`), LM Studio's experimental format (`input` array + `system_prompt`), and Ollama's native `/api/chat` (`options.num_ctx` + `format` schema) without modifying your underlying models.
+- **Dynamic Schemas & Thinking Suppression:** Seamlessly switch between standard OpenAI JSON (`response_format.json_object`), LM Studio (`/v1/chat/completions` with `reasoning_effort: "none"`), and Ollama's native `/api/chat` (`options.num_ctx` + `think: false` + `format` schema) without modifying your underlying models.
 
 ### 👁️ Vision, Detection & OCR
 - **On-Device Detectors:** Choose between RT-DETR-v2 (default, 11.1 MB, fast bubble & text detection) and Comic Text Detector with pixel-mask segmentation (94.7 MB, dense bubble seeding).
@@ -149,7 +149,7 @@ Libre Manga Translator coordinates vision, OCR, translation, and inpainting thro
   - **PP-OCRv6 Manga** (~21 MB): Lightweight fine-tune optimized specifically for Japanese manga text.
   - **Manga-OCR** (~460 MB): Flagship model for vertical writing, stylized lettering, and complex Japanese typography.
   - **Pororo OCR** (~74 MB): Korean specialist engine (TPS-VGG-BiLSTM architecture with 2,589 vocabulary) optimized for Manhwa and Webtoon text extraction.
-- **Intelligent Script Gate (Local and API modes):** An on-device script-identification model checks every bubble before translation. Non-target text, sound effects (SFX), and artwork lettering remain untouched with a dashed indicator and an optional one-click *Translate anyway* override. Gemini mode does not run the gate.
+- **Intelligent Script Gate & Orientation (Local and API modes):** An on-device script-identification model checks every bubble before translation with pulse-evidence orientation classification (`classifyBoxOrientation`), properly reading vertical Japanese text even in square or wide bubbles. Non-target text, sound effects (SFX), and artwork lettering remain untouched with a dashed indicator and an optional one-click *Translate anyway* override. Gemini mode does not run the gate.
 - **Resumable Model Downloads:** Every weight is opt-in — press Download when ready, then pause and resume anytime from the setup wizard, popup, or sidebar (progress follows you across all three). Deleting a cached model restarts its download from scratch.
 
 ### 🎨 Inpainting & Typography
@@ -161,11 +161,13 @@ Libre Manga Translator coordinates vision, OCR, translation, and inpainting thro
 
 ### 📖 Reader Experience & Automation
 - **Floating Hover Trigger:** Hover any manga image (`>= 260px`) to reveal a low-profile pinned **Translate** pill. After translation, it transforms into an unobtrusive action hub for editing, adjusting boxes, or toggling view modes.
-- **Continuous Auto-Translate:** Automatically detects and translates chapter pages as they scroll into the viewport with sequential queue management to prevent VRAM or API rate exhaustion.
+- **Continuous Auto-Translate:** Automatically detects and translates chapter pages as they scroll into the viewport with sequential queue management, attempt budgets (max 2 attempts per page), and streak-based pausing to prevent provider rate exhaustion.
+- **Isolated Alerts & Non-Intrusive Toasts:** Document-level notification channel (`AlertHost`) mounted directly on `document.body` displays non-blocking toasts during auto-scroll and dismissible modals with contextual retry for manual translations, without modifying page DOM styles.
 - **Multi-Layer Visual Canvas Editor:** Seamlessly inspect and switch between **Raw Scan**, **Cleaned Scan** (inpainted background), and **Result Scan** layers.
 - **Interactive Inpaint Patch & Restore:** Paint additional inpaint patches or restore raw original artwork directly on the cleaned canvas without re-translating.
-- **Contextual In-Place Styling:** In-canvas floating toolbar (`ContextualStyleBar`) to adjust font family, size, alignment, and color per bubble, plus raw OCR transcript inspection via `FloatingRawTextPill`.
-- **Series Context & Continuity:** Preserves series title, character glossaries, and the last 5 translated bubbles across chapter pages for terminology consistency.
+- **Contextual In-Place Styling:** In-canvas floating toolbar (`ContextualStyleBar`) to adjust font family, size, alignment, and color per bubble, plus raw OCR transcript inspection via `FloatingRawTextPill`. All draggable overlay elements (toolbars, style bar, source-text pill, bounding boxes) are bounds-checked on render and clamp while dragging, so they can never rest outside the manga image display.
+- **Series Context & Continuity:** Preserves series title, character glossaries, and the last 5 translated bubbles across chapter pages for terminology consistency, with smart in-place updates on page re-runs without consuming extra history slots.
+- **Page Cache Fingerprinting:** Automatically invalidates cached page translations when translation pipeline settings change, with in-toolbar re-translate and a dedicated cache clearing panel.
 - **Site Rule Adapters:** Regex-based rules detect series names, chapters, and page numbers across popular manga sites, with an integrated AI rule generator to create new adapters in seconds.
 
 ### 🛡️ Privacy, Security & Control
@@ -185,11 +187,11 @@ All core functionality is now fully released. Our current focus is actively impr
 
 The core translation engine is complete, offering a production-grade, offline-first reader experience across Chrome and Firefox:
 
-- **Three Translation Modes** — 100% on-device local translation (WebLLM on GPU, ONNX Runtime on WebAssembly where a model needs it), private self-hosted servers (Ollama, LM Studio), or direct cloud translation (Gemini API).
-- **Vision & Multilingual OCR** — On-device speech bubble detection and multilingual text extraction (PaddleOCR, Japanese Manga-OCR, PP-OCRv6 Manga, and Korean Pororo OCR) with smart script filtering.
+- **Three Translation Modes** — 100% on-device local translation (WebLLM on GPU, ONNX Runtime on WebAssembly where a model needs it), private self-hosted servers (native Ollama with dynamic context window auto-growth and thinking suppression, LM Studio with `/v1` normalization), or direct cloud translation (Gemini API with shared retry architecture).
+- **Vision & Multilingual OCR** — On-device speech bubble detection and multilingual text extraction (PaddleOCR, Japanese Manga-OCR, PP-OCRv6 Manga, and Korean Pororo OCR) with stroke-density vertical text orientation and smart script filtering.
 - **Adaptive Inpainting & Redraw** — Seamless text removal using intelligent paper sampling and neural redraw (LaMa), backed by an "Always Inpaint" override for complex backgrounds.
 - **Multi-Layer Visual Canvas Editor** — In-place reader editor with layer switching (Raw, Cleaned, and Result), interactive inpaint patch/restore drawing tools, and contextual typography styling.
-- **Reader Automation & Ergonomics** — Zero-flicker hover translation trigger, continuous scroll auto-translation, series context memory, and one-click high-resolution image export.
+- **Reader Automation & Ergonomics** — Zero-flicker hover translation trigger, continuous scroll auto-translation with failure pause safeguards, isolated document-level alerts, page cache fingerprinting, series context in-place upsert, and one-click high-resolution image export.
 - **Resumable Downloads** — Opt-in model weights with cross-UI pause/resume (setup, popup, sidebar), cache-gated option switching, and automatic Fast fallback when LaMa weights are missing.
 - **Privacy by Design** — Zero telemetry, no analytics, no external servers, and completely local execution.
 

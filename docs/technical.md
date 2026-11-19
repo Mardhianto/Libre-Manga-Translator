@@ -44,7 +44,7 @@ Developer-facing details for Libre Manga Translator: models, settings, pipeline 
 | Inpainting | Fast model-free engine ladder (Rung 0: Planar fill, Rung 1: Bilateral denoise, Rung 2: Telea) + independent Quality mode (standalone neural LaMa redraw, `~207 MB`, with Fast ladder fallback) |
 | Local translation | [WebLLM](https://webllm.mlc.ai/) (Llama-3.2-1B / Qwen3.5-0.8B / Gemma2-2B-JPN / Qwen3.5-2B / Hermes-3-3B / Qwen3.5-4B / Phi-4-mini / Qwen3.5-9B) |
 | Cloud translation | Gemini API via REST |
-| API Mode backends | Ollama, LM Studio, OpenAI-compatible |
+| API Mode backends | Ollama (native `/api/chat` with dynamic `num_ctx`), LM Studio (`/v1`), OpenAI-compatible |
 | Storage | WXT storage (wraps chrome.storage); model weights in browser cache (see below) |
 | Build | Bun + WXT |
 | License (program) | AGPL-3.0-or-later (see `LICENSE`; weights on-demand per upstream license) |
@@ -186,7 +186,7 @@ Related settings:
 | Language Gate | On | See [Script Gate](#script-gate). |
 | Model Updates | Manual | Per-model Auto-Update toggle removed post-rework; use **System › Model Storage** update checker. |
 
-Preprocessing per region (`src/lib/ocr/utils.ts`, `src/lib/ocr/main.ts`): polarity normalization → contrast boost → padding; single-line crops (`min(h, w) < 24px`) go through whole, larger regions are sliced into lines. OCR runs at `recImgHeight: 48`, batch size 4 (`src/lib/configs.ts`). The PaddleOCR session is keyed `repo:file` so per-group packs swap and fixed-file engines keep their session; swaps log `[ocr] swapping/loading rec model`.
+Preprocessing per region (`src/lib/ocr/utils.ts`, `src/lib/ocr/main.ts`): polarity normalization → contrast boost → padding. Orientation classification uses stroke-density projection profiles and pulse evidence (`classifyBoxOrientation`, `shouldRotateOcrCrop`) rather than bounding-box aspect ratio alone to distinguish vertical columns from horizontal lines on square or wide bubbles. Line drops and OCR failures are tracked in `ocrFailures` (`src/lib/ocr/accounting.ts`) and surfaced with retry controls in the overlay; unclean results with OCR failures or untranslated boxes are excluded from series context and disk cache via `isCleanResult`. OCR runs at `recImgHeight: 48`, batch size 4 (`src/lib/configs.ts`). The PaddleOCR session is keyed `repo:file` so per-group packs swap and fixed-file engines keep their session; swaps log `[ocr] swapping/loading rec model`.
 
 Current state: per-language packs ship/fetch automatically (Latin + Chinese/Japanese in onboarding, the rest on first use, overlay names the pack while downloading). Remaining OCR work is recognition quality on Chinese/Korean layouts (manhua / manhwa / webtoon).
 
@@ -232,7 +232,7 @@ Method picker (`src/lib/components/settings/InpaintSettings.svelte`, under **Ren
 
 Source: `src/lib/gate/` (`charset.ts`, `ctc.ts`, `osd.ts`, `index.ts`). Self-check: `bun run check:gate` (`scripts/gate-selfcheck.ts`, 57 asserts).
 
-Before translating, each region is checked against the source language: a lightweight on-device script-identification model (`ogkalu/image-script-identification`, `~3.7 MB`, `osd_lstm.onnx`) over the actual pixels, confirmed against the recognized text (`cjkShare`, neutral chars never count). Strict when a CJK source is explicit; additive page-majority under Auto-Detect. Held-back regions keep their original text, render with a dashed amber outline, and offer **Translate anyway** (`gateForce` bypass). Toggle: **Settings › OCR › Language Gate** (`sync:script-gate`). A broken or offline gate never blocks translation — it degrades to text-only verification. Gemini runs neither the gate nor OCR ([Stage coverage per mode](#stage-coverage-per-mode)).
+Before translating, each region is checked against the source language: a lightweight on-device script-identification model (`ogkalu/image-script-identification`, `~3.7 MB`, `osd_lstm.onnx`) over the actual pixels, confirmed against the recognized text (`cjkShare`, neutral chars never count). Strict when a CJK source is explicit; additive page-majority under Auto-Detect. Unmapped, low-confidence, or non-CJK labels (e.g. Khmer hallucinations on vertical text) in CJK context fall back to the Chinese recognition pack (`chinese` which Japanese maps to) with `groupSource: "unresolved"` instead of defaulting to Latin. Held-back regions keep their original text, render with a dashed amber outline, and offer **Translate anyway** (`gateForce` bypass). Toggle: **Settings › OCR › Language Gate** (`sync:script-gate`). A broken or offline gate never blocks translation — it degrades to text-only verification. Gemini runs neither the gate nor OCR ([Stage coverage per mode](#stage-coverage-per-mode)).
 
 ## Model Storage & Cache Management
 
@@ -241,12 +241,25 @@ Before translating, each region is checked against the source language: a lightw
 ## Security Hardening
 
 - **SSRF-gated image proxy:** `PROXY_IMAGE` validates every URL with `isAllowedImageUrl()` (`src/lib/security.ts`) — `http(s)` allowlist only; rejects embedded credentials, loopback/local hostnames, RFC1918 private IPs, link-local/cloud-metadata ranges, integer/hex IP bypasses, and internal schemes; `data:`/`blob:` never proxied from background. Self-check: `bun run check` via `scripts/security-selfcheck.ts`.
-- **Strict translation schemas:** `validateTranslationResult(raw, expectedCount)` (`src/lib/server/validator.ts`) coerces every `translations` item to a string and heals count drift — short arrays are padded with `""`, extras truncated — so one merged-away bubble cannot fail a whole page; `sourceTexts`/`context` are validated when present. Pass `{ strict: true }` to throw on mismatch instead. Wired into `translateWithServer`, `translateLocal` (with null-content guard), and `translateWithGemini`. Self-check: `scripts/validator-selfcheck.ts` (`bun run check:validator`).
+- **Strict translation schemas:** `validateTranslationResult(raw, expectedCount)` (`src/lib/server/validator.ts`) coerces every `translations` item to a string and heals count drift — short arrays are padded with `""`, extras truncated — so one merged-away bubble cannot fail a whole page; `sourceTexts`/`context` are validated when present. `maskUntranslated` applies a 0.15 threshold to catch single-character Japanese leaks and kana remnants. A single-round targeted correction pass (`src/lib/server/correction.ts`) re-translates untranslated boxes while protecting already-valid translations (`keepBetterTranslation`). Pass `{ strict: true }` to throw on mismatch instead. Wired into `translateWithServer`, `translateLocal` (with null-content guard), and `translateWithGemini`. Self-check: `scripts/validator-selfcheck.ts` (`bun run check:validator`).
 - **SHA-256 download integrity:** known-hash manifest (`src/lib/manifests/hashes.ts`) verified in `downloadArtifactHF` (`src/lib/utils.ts`) via Web Crypto; mismatch evicts the cache entry and aborts session creation. Resumable streams (`streamArtifactToCache`) additionally refuse to cache any stream ending short of its advertised length, keeping the partial for Resume instead. Self-check: `scripts/hashes-selfcheck.ts`.
 
 ## Auto-Translate Engine
 
 Orchestrator `src/entrypoints/content/auto-translate.ts` (`AutoTranslateOrchestrator` + `AutoTranslateQueue`, sequential `concurrency: 1` default, `WeakSet`/registry dedupe, detached-image skip). Gated by `sync:auto-translate` (default `false`, toggle in popup `Home` and `Vision › Detection` via `AutoTranslateToggle.svelte`); overlay auto-bypasses `refining` when on (same as `skipBboxRefining`). Candidate selection: adapter `imageSelector` within `containerSelector` when the active `SiteRule` provides them, else generic `naturalWidth > 500 && naturalHeight > 500` fallback (`<= 500px` ignored). `IntersectionObserver` (`rootMargin: "200px"`) + `MutationObserver` for lazy chapter pages. Rule fields extended with `containerSelector?`/`imageSelector?` (`src/lib/adapters.ts`, `wxt-env.d.ts`); community adapters carry verified selectors (MangaDex blob-image fix, MangaFire, Comick, WeebCentral, plus `mgeko.cc`, `comix.to`).
+
+Auto-translate resilience:
+- **Failure budget & pause:** Pages are capped at `MAX_AUTO_ATTEMPTS = 2` dispatches; a streak of `MAX_CONSECUTIVE_FAILURES = 3` pauses the queue to avoid endless retry loops and provider rate exhaustion.
+- **Non-blocking feedback:** Failures during auto-translate show non-intrusive toasts (`pushNotice`) instead of blocking modal dialogs, closing failed overlays cleanly.
+- **Isolated Alert Host:** Error dialogs and toasts render via an isolated document-level shadow root on `document.body` (`AlertHost.svelte` + `alerts.ts`, `position: fixed; z-index: 2147483000`), with capture-phase Escape rescue and no parent `z-index` modifications.
+
+## Page Cache & Fingerprinting
+
+Page cache fingerprints (`src/lib/cache/page-cache.ts`, `PageCacheFingerprint`) hash key translation pipeline parameters (`sourceLang`, `targetLang`, `ocrEngine`, `ocrMinConfidence`, `detectionModel`, `llmModel`, `temperature`, `promptVersion`). Changes to any setting invalidate previously cached translations on read. UI: re-translate toolbar button in `OverlayToolbar.svelte`, `lmt:settings-changed` listener, and a "Clear page cache" management panel in `PageCacheSettings.svelte`.
+
+## Request Retry & Backoff Architecture
+
+`src/lib/request-retry.ts` provides a unified retry engine for both API Mode (`server/main.ts`) and Gemini API (`gemini/main.ts`): retries transient errors (transport, HTTP 429, 5xx) with jittered exponential backoff and `Retry-After` header parsing; non-retryable 4xx client errors, parse errors (`markNonRetryable`), and user aborts fail immediately.
 
 ## GPU Controls
 
@@ -307,16 +320,18 @@ src/
   lib/
     adapters.ts          # Trusted core rules + URL-to-metadata matching + container/image selectors
     adapters/            # Community site adapters (auto-imported at build)
+    cache/page-cache.ts  # Fingerprinted page cache with pipeline settings invalidation
     security.ts          # isAllowedImageUrl SSRF allowlist
     hardware.ts          # WebGPU probe + normalizeGpuState + resolveExecutionProviders
+    request-retry.ts     # Unified HTTP retry/backoff policy across LLM backends
     manifests/hashes.ts  # SHA-256 manifest for model downloads
     models/updates.ts    # Manual update checker (CHECK_MODEL_UPDATES / UPDATE_CACHED_MODEL)
     components/
       Overlay.svelte     # Translation overlay shell (refining/loading/results/editing, cache-aware)
       FloatingTrigger.svelte  # Hover translate pill + post-translation action hub
       Sidebar.svelte     # On-page sliding panel (Translate / Vision / Render / System)
-      overlay/           # BubbleRenderer + BubbleEditor + OverlayToolbar + EditorToolbar + InpaintCanvasEditor + ContextualStyleBar + FloatingRawTextPill
-      settings/          # Detection / Ocr / Backend / Typography / Inpaint / ModelStorage / ModelUpdateChecker / SiteRules / Debug / GpuAccelerationPanel / AutoTranslateToggle
+      overlay/           # BubbleRenderer + BubbleEditor + OverlayToolbar + EditorToolbar + InpaintCanvasEditor + ContextualStyleBar + FloatingRawTextPill + AlertHost.svelte + alerts.ts
+      settings/          # Detection / Ocr / Backend / Typography / Inpaint / ModelStorage / ModelUpdateChecker / SiteRules / Debug / GpuAccelerationPanel / AutoTranslateToggle / PageCacheSettings
       ui/ModelSelect.svelte  # Shared picker with Cached badge + download/progress
     configs.ts           # Defaults: modes, models, languages, fonts, thresholds, inpaint method, lang-group resolution
     canvas/              # text-fit + inpaint + export helpers (extracted from legacy utils)
@@ -325,9 +340,9 @@ src/
     gate/                # Script gate: charset math, CTC convention, OSD session, voting/decision
     gemini/              # Gemini API client and prompt construction
     inpaint/             # Fast ladder + Quality LaMa-first: mask fit, ring stats, planar fill, denoise, LaMa, Telea, decline metric
-    ocr/                 # main.ts (coordinator) + types.ts + paddle.ts + manga-ocr.ts + pororo.ts + utils.ts (in-tree JS CTC, zero eval)
+    ocr/                 # main.ts (coordinator) + types.ts + paddle.ts + manga-ocr.ts + pororo.ts + utils.ts + accounting.ts
     prompts.ts           # Shared prompt builders for all backends
-    server/              # API Mode: schemas.ts (openai/lmstudio/ollama bodies) + prompt-budget.ts + validator.ts + main.ts
+    server/              # API Mode: schemas.ts (openai/lmstudio/ollama bodies) + prompt-budget.ts + validator.ts + correction.ts + main.ts
     utils.ts             # Canvas painting, text fitting, bbox math, cache hashing, SHA-256-verified HF download
     webllm.ts            # WebLLM loader and translation interface (validated output)
 
@@ -341,6 +356,8 @@ scripts/
   validator-selfcheck.ts # API schema validator self-check
   hashes-selfcheck.ts    # Resource SHA-256 integrity self-check
   extract-ppocrv6-dict.cjs  # Refresh bundled PP-OCRv6 dict
+  ollama-live-check.ts   # Ollama native live check with prompt budget
+  lmstudio-live-check.ts # LM Studio live check with context window probe
 ```
 
 ## Debug Logging & Sensitive Data
@@ -371,6 +388,8 @@ bun run check:security  # SSRF allowlist self-check
 bun run check:validator # translation schema self-check
 bun run check:ocr-packs # 11 language groups + 35 langs + model HEAD checks
 bun run extract-dict    # refresh public/dicts/ppocrv6_dict.txt
+bun run ollama:live     # live Ollama acceptance test
+bun run lmstudio:live   # live LM Studio acceptance test
 bun run build           # produces .output/chrome-mv3/
 bun run build:firefox   # produces .output/firefox-mv2/
 bun run dev             # Chrome, hot reload

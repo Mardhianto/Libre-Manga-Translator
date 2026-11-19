@@ -75,6 +75,15 @@ describe("isCacheValid", () => {
     expect(isCacheValid(sampleCache, currentFp)).toBe(true);
   });
 
+  it("preserves cleanedSrc in cache object", () => {
+    const cacheWithCleaned: PageCache = {
+      ...sampleCache,
+      cleanedSrc: "data:image/png;base64,customCleaned",
+    };
+    expect(isCacheValid(cacheWithCleaned, currentFp)).toBe(true);
+    expect(cacheWithCleaned.cleanedSrc).toBe("data:image/png;base64,customCleaned");
+  });
+
   it("invalidates when source language changes", () => {
     const cache: PageCache = {
       ...sampleCache,

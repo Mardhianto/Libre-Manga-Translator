@@ -59,6 +59,7 @@
     renderTranslations: (
       translations: Translations,
       bboxes: Bbox[],
+      cleanedBaseUrl?: string,
     ) => Promise<string>;
     exportCanvasToJpeg: (canvas: HTMLCanvasElement, quality?: number, filename?: string) => void;
     onClose: () => void;
@@ -92,6 +93,12 @@
   const rawDisplaySrc = $derived(rawImageUrl || originalSrc);
 
   function getInitialToolbarPosition(): { x: number; y: number } {
+    // Live image display rect (the wrapper is glued to the image), so a
+    // reset after re-layout or scroll lands on the image, not its mount-time
+    // snapshot.
+    const liveRect = wrapper.getBoundingClientRect();
+    const imageRect =
+      liveRect.width > 0 && liveRect.height > 0 ? liveRect : targetImageRect;
     try {
       const saved = localStorage.getItem("lmt-toolbar-pos");
       if (saved) {
@@ -106,16 +113,57 @@
     } catch {}
 
     // Default to Bottom-Left of the target manga/viewport
-    const defaultX = Math.max(16, Math.min(window.innerWidth - 380, targetImageRect.left + 20));
+    const defaultX = Math.max(16, Math.min(window.innerWidth - 380, imageRect.left + 20));
     const defaultY = Math.min(
       window.innerHeight - 95,
-      Math.max(80, targetImageRect.bottom - 95)
+      Math.max(80, imageRect.bottom - 95)
     );
     return { x: defaultX, y: defaultY };
   }
 
+  /**
+   * Clamp a dragged refining-toolbar position so it stays inside the image
+   * display; when the toolbar cannot fit inside it at all, hold the default
+   * position instead.
+   */
+  function clampToolbarInsideDisplay(next: { x: number; y: number }): { x: number; y: number } {
+    const rect = toolbarDragStart?.rect;
+    const display = wrapper.getBoundingClientRect();
+    if (!rect || display.width <= 0 || display.height <= 0) return next;
+    const pad = 8;
+    const minX = display.left + pad;
+    const maxX = display.right - pad - rect.width;
+    const minY = display.top + pad;
+    const maxY = display.bottom - pad - rect.height;
+    if (maxX < minX || maxY < minY) return getInitialToolbarPosition();
+    return {
+      x: Math.max(minX, Math.min(maxX, next.x)),
+      y: Math.max(minY, Math.min(maxY, next.y)),
+    };
+  }
+
+  /**
+   * Render-time fallback for the refining toolbar: if it rendered outside the
+   * image display (stale saved position, re-layout, scroll), return it to the
+   * default position and refresh the stored value.
+   */
+  function resetToolbarPosition() {
+    const def = getInitialToolbarPosition();
+    if (toolbarPosition.x === def.x && toolbarPosition.y === def.y) return;
+    toolbarPosition = def;
+    try {
+      localStorage.setItem("lmt-toolbar-pos", JSON.stringify(def));
+    } catch {}
+  }
+
   let toolbarPosition = $state(getInitialToolbarPosition());
-  let toolbarDragStart = $state<{ startX: number; startY: number; initialX: number; initialY: number } | null>(null);
+  let toolbarDragStart = $state<{
+    startX: number;
+    startY: number;
+    initialX: number;
+    initialY: number;
+    rect: DOMRect | null;
+  } | null>(null);
   let readingDirection = $state<"rtl" | "ltr">("rtl");
   let mode = $state<"loading" | "refining" | "results" | "editing">("loading");
   let activeEditorLayer = $state<EditorLayer>("inpainted");
@@ -684,6 +732,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     return executeTranslation();
   }
 
+  let snapshotCleanedUrl = "";
   async function openEditPanel() {
     if (mode !== "results") return;
     editDrafts = translations.slice();
@@ -699,6 +748,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
         console.warn("LMT: Could not fetch cleaned background image", err);
       }
     }
+    snapshotCleanedUrl = cleanedUrl;
     activeEditorLayer = "inpainted";
     activeInpaintTool = "none";
     inpaintPatches = [];
@@ -708,28 +758,35 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     }
   }
 
+  async function applyPendingInpaintPatches(): Promise<string | undefined> {
+    if (inpaintPatches.length === 0 || !applyInpaintPatches) return cleanedUrl;
+    isApplyingInpaint = true;
+    const added = inpaintPatches
+      .filter((p) => p.type === "add-inpaint")
+      .map((p) => ({ x1: p.x1, y1: p.y1, x2: p.x2, y2: p.y2, confidence: 1 }));
+    const removed = inpaintPatches
+      .filter((p) => p.type === "restore-raw")
+      .map((p) => ({ x1: p.x1, y1: p.y1, x2: p.x2, y2: p.y2, confidence: 1 }));
+    try {
+      cleanedUrl = await applyInpaintPatches(cleanedUrl || rawDisplaySrc, added, removed);
+      inpaintPatches = [];
+      return cleanedUrl;
+    } catch (err) {
+      // A manual edit failure is not a page-translation failure: reporting it
+      // would spend the auto queue's retry budget for this page (LMT-034).
+      showError("Failed to apply inpaint patches: " + (err as Error).message, {
+        report: false,
+      });
+      return undefined;
+    } finally {
+      isApplyingInpaint = false;
+    }
+  }
+
   async function applyEditorChanges() {
     // 1. If inpaint patches exist, apply them to the cleaned canvas
-    if (inpaintPatches.length > 0 && applyInpaintPatches) {
-      isApplyingInpaint = true;
-      const added = inpaintPatches
-        .filter((p) => p.type === "add-inpaint")
-        .map((p) => ({ x1: p.x1, y1: p.y1, x2: p.x2, y2: p.y2, confidence: 1 }));
-      const removed = inpaintPatches
-        .filter((p) => p.type === "restore-raw")
-        .map((p) => ({ x1: p.x1, y1: p.y1, x2: p.x2, y2: p.y2, confidence: 1 }));
-      try {
-        cleanedUrl = await applyInpaintPatches(cleanedUrl || rawDisplaySrc, added, removed);
-        inpaintPatches = [];
-      } catch (err) {
-        // A manual edit failure is not a page-translation failure: reporting it
-        // would spend the auto queue's retry budget for this page (LMT-034).
-        showError("Failed to apply inpaint patches: " + (err as Error).message, {
-          report: false,
-        });
-      } finally {
-        isApplyingInpaint = false;
-      }
+    if (inpaintPatches.length > 0) {
+      await applyPendingInpaintPatches();
     }
 
     // 2. Commit text edits & repaint
@@ -740,7 +797,9 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       translatedUrl = await renderTranslations(
         $state.snapshot(translations),
         $state.snapshot(bboxes),
+        cleanedUrl || undefined,
       );
+      snapshotCleanedUrl = cleanedUrl;
       mode = "results";
     } catch (err) {
       mode = "editing";
@@ -754,6 +813,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
     editDrafts = translations.slice();
     inpaintPatches = [];
     activeInpaintTool = "none";
+    cleanedUrl = snapshotCleanedUrl;
     mode = "results";
   }
 
@@ -793,6 +853,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       translatedUrl = await renderTranslations(
         $state.snapshot(translations),
         $state.snapshot(bboxes),
+        cleanedUrl || undefined,
       );
     } catch (err) {
       showError((err as Error).message, { report: false });
@@ -1161,14 +1222,14 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       e.preventDefault();
 
       requestAnimationFrame(() => {
-        // Toolbar drag
+        // Toolbar drag — clamped to the image display bounds
         if (toolbarDragStart) {
           const dx = e.clientX - toolbarDragStart.startX;
           const dy = e.clientY - toolbarDragStart.startY;
-          toolbarPosition = {
-            x: Math.max(10, Math.min(window.innerWidth - 320, toolbarDragStart.initialX + dx)),
-            y: Math.max(10, Math.min(window.innerHeight - 80, toolbarDragStart.initialY + dy)),
-          };
+          toolbarPosition = clampToolbarInsideDisplay({
+            x: toolbarDragStart.initialX + dx,
+            y: toolbarDragStart.initialY + dy,
+          });
           return;
         }
 
@@ -1407,11 +1468,15 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       isDraggingToolbar={toolbarDragStart !== null}
       {readingDirection}
       onDragStart={(e) => {
+        const root = (e.currentTarget as HTMLElement | null)?.closest(
+          "[data-lmt-toolbar]",
+        );
         toolbarDragStart = {
           startX: e.clientX,
           startY: e.clientY,
           initialX: toolbarPosition.x,
           initialY: toolbarPosition.y,
+          rect: root instanceof HTMLElement ? root.getBoundingClientRect() : null,
         };
       }}
       onAddBox={addBox}
@@ -1422,6 +1487,7 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       onConfirm={handleConfirm}
       onUndo={undo}
       onRedo={redo}
+      onResetPosition={resetToolbarPosition}
       onClose={() => {
         if (previousImageUrl) {
           translatedUrl = previousImageUrl;
@@ -1595,7 +1661,10 @@ function applyBboxesSort(direction: "rtl" | "ltr" = "rtl") {
       hasActiveBox={activeIndex !== null}
       pendingPatchCount={inpaintPatches.length}
       isApplying={isApplyingInpaint}
-      onSelectLayer={(layer) => {
+      onSelectLayer={async (layer) => {
+        if (activeEditorLayer === "cleaned" && layer !== "cleaned" && inpaintPatches.length > 0) {
+          await applyPendingInpaintPatches();
+        }
         activeEditorLayer = layer;
         if (layer !== "cleaned") activeInpaintTool = "none";
       }}

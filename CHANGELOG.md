@@ -1,5 +1,58 @@
 # Changelog
 
+## v1.0.6 — November 2026
+
+Vertical Japanese OCR orientation classification via ink-band and pulse evidence, native Ollama schema with dynamic context window auto-growth and thinking suppression, LM Studio endpoint normalization and loaded-window probing, isolated document-level alert host with stacking context fixes, auto-translate failure budgets and automatic streak pausing, unified request retry and backoff across LLM backends, page cache fingerprinting on configuration changes, targeted single-round translation self-correction, overlay boundary containment across all floating controls and bubble boxes, and cleaned scan reuse with manual inpaint patch persistence.
+
+### Added
+
+- **Vertical text orientation classifier:** Pulse and ink-band projection profile classifier (`classifyBoxOrientation`, `shouldRotateOcrCrop`) analyzes stroke densities to properly identify vertical text in square and wide dialogue bubbles
+- **Native Ollama `/api/chat` schema:** Native Ollama schema with direct context window configuration (`serverNumCtx`, default 4096, up to 32768) and reasoning token suppression (`think: false`)
+- **Dynamic prompt budget engine:** Intelligent token estimator (`src/lib/server/prompt-budget.ts`) calibrates prompt weights per script class, auto-grows `num_ctx` when large pages require it, and scales output caps based on bubble count (`resolveOutputCap`)
+- **Isolated document-level alert host:** Decoupled alert dialogs and toast notifications into an independent shadow root mounted on `document.body` (`AlertHost.svelte`, `position: fixed; z-index: 2147483000`)
+- **Unified LLM retry architecture:** Centralized retry engine (`src/lib/request-retry.ts`) across Gemini and API Mode with jittered exponential backoff, status filtering (429/5xx only), and `Retry-After` header parsing
+- **Auto-translate queue safeguards:** Added page attempt caps (`MAX_AUTO_ATTEMPTS = 2`) and automatic queue pausing after consecutive failures (`MAX_CONSECUTIVE_FAILURES = 3`) to prevent provider hammering
+- **Non-blocking auto-translate feedback:** Failures during auto-translate render as non-blocking toasts (`pushNotice`) instead of disruptive modal dialogs, closing failed overlays cleanly
+- **Page cache fingerprinting:** Added `PageCacheFingerprint` (`src/lib/cache/page-cache.ts`) to invalidate cached translations when pipeline settings change, paired with a re-translate toolbar button and "Clear page cache" management panel
+- **1-round translation self-correction:** Targeted secondary translation pass (`src/lib/server/correction.ts`) re-translates untranslated boxes while protecting passing translations from regression (`keepBetterTranslation`)
+- **Series context in-place upsert:** `upsertHistoryEntry` updates existing page records in-place during re-translations without consuming new history slots or wiping previous pages
+- **Overlay display boundary containment:** Comprehensive containment helper (`src/lib/components/overlay/bounds.ts`) clamps all floating toolbars (`OverlayToolbar`, `EditorToolbar`), contextual style bars (`ContextualStyleBar`), raw OCR pills (`FloatingRawTextPill`), and speech bubble editors (`BubbleEditor`) to stay within the rendered manga image surface
+- **Cleaned scan caching & manual inpaint persistence:** Reuses pre-cleaned backgrounds (`cleanedSrc`) directly on page cache hits without re-inpainting, preserves manual inpaint patches across translation repaints via `isManual` cache tracking, and auto-applies pending patches on editor layer switches
+- **Live Playwright E2E configuration:** Added `playwright.live.config.ts` for live end-to-end testing against real LLM backends (`tests/live/e2e/`), decoupled from hermetic CI workflows
+
+### Changed
+
+- **CJK script gate fallback:** Unmapped, low-confidence, or non-CJK OSD labels on CJK pages fall back to the Chinese recognition pack (`chinese`) with `groupSource: "unresolved"` instead of defaulting to Latin
+- **LM Studio endpoint resolution:** Automatically normalizes LM Studio host URLs to `<origin>/v1/chat/completions`, stripping legacy `/api/v1` or `/api` prefixes, and suppresses thinking via `reasoning_effort: "none"`
+- **LM Studio context probing:** Probes loaded context window (`loaded_context_length`) via `/v1/models` and warns when page prompt tokens exceed pre-allocated context memory
+- **Translation validator sensitivity:** Hardened `maskUntranslated` with a 0.15 threshold to catch single-character Japanese leaks and kana remnants
+- **Refining toolbar ergonomics:** Streamlined `OverlayToolbar` by removing the redundant drag handle button in favor of unified toolbar-wide drag handling and image boundary containment
+- **Live LLM test decoupling:** Relocated live LLM integration tests from `tests/unit/` to `tests/live/unit/` and removed mock server setup from default CI workflows
+
+### Fixed
+
+- **Unclickable error dialogs on canvas readers:** Removed destructive `parentElement.style.zIndex` writes in `Overlay.svelte` that altered host reader layout and allowed transparent tap layers to occlude modals (e.g. MangaOne)
+- **Modal event loss during state transitions:** Decoupled alerts from per-page overlays so `loading → refining` flips during button clicks no longer swallow dismiss events
+- **Reader keyboard event trapping:** Added capture-phase global listener for Escape key to dismiss alerts even when host readers intercept keyboard input
+- **Series context history wipe on re-runs:** Fixed issue where re-translating the active page was flagged as a chapter discontinuity, wiping previous pages from history
+- **Infinite auto-translate retry loops:** Prevented repeated re-scanning and re-enqueuing of failing pages during provider outages
+- **Floating overlay drift outside viewport:** Clamped dragged toolbars, contextual style bars, raw text pills, and bubble boxes to the manga display rect, with auto-recovery on resize or window scroll
+- **Manual inpaint erasure on text edit:** Repainting translations after editing text now retains manual inpaint patches instead of overwriting with a newly generated inpaint mask
+- **Auto-translate budget leakage on edit errors:** Flagged manual inpaint patch failures with `report: false` so user edit issues do not spend the auto-translate failure budget
+
+### Technical
+
+- Added `src/lib/components/overlay/bounds.ts` for image display boundary clamping and outside-rect detection
+- Added `src/lib/request-retry.ts` for centralized, testable HTTP backoff and retry predicates
+- Added `src/lib/server/prompt-budget.ts` for script-aware token estimation and dynamic context window calculation
+- Added `src/lib/server/correction.ts` for non-regressive single-round translation repair
+- Added `src/lib/cache/page-cache.ts` for fingerprint-based page cache invalidation
+- Added `src/lib/ocr/accounting.ts` for tracking OCR line drops and failure metrics
+- Added `src/lib/components/overlay/AlertHost.svelte` and `alerts.ts` for document-level notifications
+- Added `playwright.live.config.ts` for dedicated live LLM acceptance runs
+- Added scripts `scripts/ollama-live-check.ts` and `scripts/lmstudio-live-check.ts` for live server verification
+- Added unit test suites for prompt budget, series context store, OCR orientation, OCR lines, page cache, correction, request retry, and Gemini requests
+
 ## v1.0.5 — November 2026
 
 Fine-grained GPU acceleration control across all ONNX and LLM stages, expanded local LLM lineup with shader-f16 feature filtering, real job timeouts with active abort signals, anti-smear inpainting for outlined text, split series context storage with sync quota protection, and enhanced OCR Auto-Detect with transparent LLM diagnostics.

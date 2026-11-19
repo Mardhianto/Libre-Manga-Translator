@@ -189,7 +189,7 @@ export default defineContentScript({
     const translatedSrcMap = new Map<string, string>();
     const inpaintedSrcCache = new Map<
       string,
-      { url: string; boxesKey: string }
+      { url: string; boxesKey: string; isManual?: boolean }
     >(); // inpainted base images, keyed to the exact set of painted boxes
     const debugEntryIdBySrc = new Map<string, string>(); // src → last debug entry id
     const overlays = new Map<
@@ -428,11 +428,34 @@ export default defineContentScript({
                     `local:${await translationKey()}`,
                   );
                   if (!isCacheValid(cache, currentFp)) return;
-                  const translatedSrc = await repaintWithTranslations(
-                    src,
-                    cache.bboxes,
-                    cache.translations,
-                  );
+                  let translatedSrc: string;
+                  if (cache.cleanedSrc) {
+                    translatedSrc = await drawTranslations(
+                      cache.cleanedSrc,
+                      cache.bboxes,
+                      cache.translations,
+                    );
+                    inpaintedSrcCache.set(src, {
+                      url: cache.cleanedSrc,
+                      boxesKey: JSON.stringify(
+                        cache.bboxes
+                          .filter((_, i) => cache.translations[i])
+                          .map((b) => [
+                            Math.round(b.x1),
+                            Math.round(b.y1),
+                            Math.round(b.x2),
+                            Math.round(b.y2),
+                          ]),
+                      ),
+                      isManual: true,
+                    });
+                  } else {
+                    translatedSrc = await repaintWithTranslations(
+                      src,
+                      cache.bboxes,
+                      cache.translations,
+                    );
+                  }
                   translatedSrcMap.set(srcKey(translatedSrc), originalSrc);
                   return {
                     bboxes: cache.bboxes,
@@ -798,6 +821,7 @@ export default defineContentScript({
                 renderTranslations: async (
                   translations: Translations,
                   bboxes: Bbox[],
+                  cleanedBaseUrl?: string,
                 ) => {
                   // Only regions we actually paint get inpainted: a gate-skipped
                   // or empty region keeps its original text untouched (erasing
@@ -818,7 +842,13 @@ export default defineContentScript({
                     | "fallback"
                     | undefined;
                   let inpaintMs: number | undefined;
-                  if (!cached || cached.boxesKey !== boxesKey) {
+
+                  if (cleanedBaseUrl) {
+                    cached = { url: cleanedBaseUrl, boxesKey, isManual: true };
+                    inpaintedSrcCache.set(src, cached);
+                  } else if (cached?.isManual) {
+                    cached.boxesKey = boxesKey;
+                  } else if (!cached || cached.boxesKey !== boxesKey) {
                     const tInpaint = performance.now();
                     const res = await inpaintImage(src, paintable);
                     inpaintMs = performance.now() - tInpaint;
@@ -934,7 +964,15 @@ export default defineContentScript({
                   if (cached?.url) return cached.url;
                   const boxes = currentBboxes ?? [];
                   const res = await inpaintImage(src, boxes);
-                  cached = { url: res.url, boxesKey: "" };
+                  const boxesKey = JSON.stringify(
+                    boxes.map((b) => [
+                      Math.round(b.x1),
+                      Math.round(b.y1),
+                      Math.round(b.x2),
+                      Math.round(b.y2),
+                    ]),
+                  );
+                  cached = { url: res.url, boxesKey };
                   inpaintedSrcCache.set(src, cached);
                   return res.url;
                 },
@@ -984,7 +1022,7 @@ export default defineContentScript({
                   }
 
                   // Update cache
-                  inpaintedSrcCache.set(src, { url: currentDataUrl, boxesKey: "" });
+                  inpaintedSrcCache.set(src, { url: currentDataUrl, boxesKey: "", isManual: true });
                   return currentDataUrl;
                 },
 

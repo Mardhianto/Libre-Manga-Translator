@@ -1,0 +1,9 @@
+[test]
+# Files `bun test` must never discover on its own.
+#
+# - `tests/live/**` drives a real OpenAI-compatible endpoint on :8033. A bare
+#   `bun test` would fail on every machine without a model backend, and CI must
+#   never start one. Run it explicitly: `bun run test:live`.
+# - `tests/e2e/**` are Playwright specs; they import `@playwright/test`, not
+#   `bun:test`, and have always errored under `bun test`. Run `bun run test:e2e`.
+pathIgnorePatterns = ["tests/live/**", "tests/e2e/**"]

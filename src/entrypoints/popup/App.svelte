@@ -6,9 +6,11 @@
     ChevronDown,
     Search,
     TriangleAlert,
+    CircleAlert,
     Download,
     Compass,
   } from "lucide-svelte";
+  import { type AppUpdateInfo, APP_UPDATE_CACHE_KEY } from "@/lib/app-version";
   import { DefaultConfig, normalizeDetectionModel, normalizeLlmModel, resolveLangGroup } from "@/lib/configs";
   import { normalizeInpaintMethod } from "@/lib/inpaint/ladder";
   import { env } from "@/lib/env";
@@ -94,6 +96,7 @@
   let inpaintGateHint = $state<string | null>(null);
   let detectorGateHint = $state<string | null>(null);
   let gateCheckBusy = $state(false);
+  let updateInfo = $state<AppUpdateInfo | null>(null);
 
   const MODES = [
     { id: "webgpu", label: "Local", desc: "100% on-device" },
@@ -397,6 +400,21 @@
 
   onMount(() => {
     loadSettings();
+    storage
+      .getItem<AppUpdateInfo>(APP_UPDATE_CACHE_KEY)
+      .then((cached) => {
+        if (cached?.hasUpdate) updateInfo = cached;
+      })
+      .catch(() => {});
+    browser.runtime
+      .sendMessage({ type: "CHECK_APP_UPDATE" })
+      .then((res) => {
+        if (res && typeof res.hasUpdate === "boolean") {
+          updateInfo = res;
+        }
+      })
+      .catch(() => {});
+
     const handleClick = () => (activeDropdown = null);
     window.addEventListener("click", handleClick);
     return () => window.removeEventListener("click", handleClick);
@@ -415,29 +433,44 @@
     </div>
 
     <!-- Quiet section switch -->
-    <div class="flex items-center gap-0.5 bg-[var(--bg-void)] p-0.5 rounded-lg border border-[var(--border-line)]">
-      <button
-        type="button"
-        onclick={() => (activeTab = "home")}
-        class="flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md transition-all cursor-pointer border
-               {activeTab === 'home'
-                 ? 'bg-[var(--surface-panel)] text-[var(--accent-cyan)] border-[var(--accent-cyan)]/40 shadow-[0_0_8px_var(--accent-cyan-glow)]'
-                 : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] border-transparent'}"
-      >
-        <Zap size={12} />
-        Home
-      </button>
-      <button
-        type="button"
-        onclick={() => (activeTab = "settings")}
-        class="flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md transition-all cursor-pointer border
-               {activeTab === 'settings'
-                 ? 'bg-[var(--surface-panel)] text-[var(--accent-amber)] border-[var(--accent-amber)]/40 shadow-[0_0_8px_var(--accent-amber-glow)]'
-                 : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] border-transparent'}"
-      >
-        <SettingsIcon size={12} />
-        Config
-      </button>
+    <div class="flex items-center gap-1.5">
+      {#if updateInfo?.hasUpdate}
+        <a
+          href={updateInfo.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Update v${updateInfo.latestVersion} available! Click to open release page.`}
+          class="flex items-center justify-center w-6 h-6 rounded-md text-[var(--accent-amber)] hover:text-[var(--accent-amber)] bg-[var(--accent-amber-soft)] border border-[var(--accent-amber)]/40 hover:border-[var(--accent-amber)] transition-colors animate-pulse cursor-pointer shrink-0"
+          aria-label="New version available"
+        >
+          <CircleAlert size={14} />
+        </a>
+      {/if}
+
+      <div class="flex items-center gap-0.5 bg-[var(--bg-void)] p-0.5 rounded-lg border border-[var(--border-line)]">
+        <button
+          type="button"
+          onclick={() => (activeTab = "home")}
+          class="flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md transition-all cursor-pointer border
+                 {activeTab === 'home'
+                   ? 'bg-[var(--surface-panel)] text-[var(--accent-cyan)] border-[var(--accent-cyan)]/40 shadow-[0_0_8px_var(--accent-cyan-glow)]'
+                   : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] border-transparent'}"
+        >
+          <Zap size={12} />
+          Home
+        </button>
+        <button
+          type="button"
+          onclick={() => (activeTab = "settings")}
+          class="flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md transition-all cursor-pointer border
+                 {activeTab === 'settings'
+                   ? 'bg-[var(--surface-panel)] text-[var(--accent-amber)] border-[var(--accent-amber)]/40 shadow-[0_0_8px_var(--accent-amber-glow)]'
+                   : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] border-transparent'}"
+        >
+          <SettingsIcon size={12} />
+          Config
+        </button>
+      </div>
     </div>
   </header>
 

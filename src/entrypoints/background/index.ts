@@ -1,6 +1,7 @@
 import { env } from "@/lib/env";
 import { downloadArtifactHF, arrayBufferToBase64DataUrl, isArtifactCached, streamArtifactToCache, resolveArtifactUrl, isAbortError, clearPartialByUrl, clearAllPartialDownloads } from "@/lib/utils";
 import { checkArtifactUpdate, forceRefreshArtifact } from "@/lib/models/updates";
+import { checkAppVersionUpdate } from "@/lib/app-version";
 import { detectHardware, ensureOffscreen } from "./utils";
 import { DefaultConfig, SUPPORTED_LANG_GROUPS, normalizeDetectionModel, resolveLangGroup } from "@/lib/configs";
 import { UNKNOWN_DETECTION_MODEL_MESSAGE } from "@/lib/detections/main";
@@ -747,6 +748,16 @@ export default defineBackground(() => {
         if (!cacheName || !url) throw new Error("Invalid update request payload");
         await forceRefreshArtifact(cacheName, url);
         return { success: true };
+      };
+
+      keepAliveWhile(task().then(respond).catch(respondErr));
+      return true;
+    }
+
+    // Check if a new version of the extension is available on GitHub
+    if (msg.type === "CHECK_APP_UPDATE") {
+      const task = async () => {
+        return await checkAppVersionUpdate(Boolean(msg.data?.force));
       };
 
       keepAliveWhile(task().then(respond).catch(respondErr));

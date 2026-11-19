@@ -1,5 +1,6 @@
 <script lang="ts">
   import { GripVertical, Copy, Check, Sparkles, LoaderCircle } from "lucide-svelte";
+  import { clampOffsetInside, isRectOutside, overlayDisplayEl } from "./bounds";
 
   interface Props {
     boxIndex: number;
@@ -26,6 +27,7 @@
   let isDragging = $state(false);
   let dragStart = { x: 0, y: 0, initialOffsetX: 0, initialOffsetY: 0 };
   let copied = $state(false);
+  let pillEl: HTMLDivElement | undefined = $state(undefined);
 
   // Reset custom drag offset whenever the active box changes or moves,
   // so a user-nudged pill re-seats relative to its box instead of keeping
@@ -36,6 +38,42 @@
     void anchorY;
     offsetX = 0;
     offsetY = 0;
+  });
+
+  /**
+   * When the pill renders, check whether it sits outside the image display
+   * (e.g. dragged away from a box that later moved to the image edge); if it
+   * does, return to the default anchored position.
+   */
+  function ensureInsideDisplay(): void {
+    const el = pillEl;
+    const displayEl = overlayDisplayEl(el);
+    if (!(el instanceof HTMLDivElement) || !displayEl) return;
+    const rect = el.getBoundingClientRect();
+    const display = displayEl.getBoundingClientRect();
+    if (!isRectOutside(rect, display)) return;
+    if (offsetX !== 0 || offsetY !== 0) {
+      offsetX = 0;
+      offsetY = 0;
+    }
+  }
+
+  // Check on every render (offset/anchor changes re-run it).
+  $effect(() => {
+    void offsetX;
+    void offsetY;
+    ensureInsideDisplay();
+  });
+
+  // Re-check when the pill or the image display itself is resized.
+  $effect(() => {
+    const el = pillEl;
+    const displayEl = overlayDisplayEl(el);
+    if (!(el instanceof HTMLDivElement) || !displayEl) return;
+    const observer = new ResizeObserver(() => ensureInsideDisplay());
+    observer.observe(displayEl);
+    observer.observe(el);
+    return () => observer.disconnect();
   });
 
   function handleMouseDown(e: MouseEvent) {
@@ -50,8 +88,28 @@
     };
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
-      offsetX = dragStart.initialOffsetX + (moveEvent.clientX - dragStart.x);
-      offsetY = dragStart.initialOffsetY + (moveEvent.clientY - dragStart.y);
+      const rect =
+        pillEl instanceof HTMLDivElement ? pillEl.getBoundingClientRect() : null;
+      const display = overlayDisplayEl(pillEl)?.getBoundingClientRect() ?? null;
+      const next = {
+        x: dragStart.initialOffsetX + (moveEvent.clientX - dragStart.x),
+        y: dragStart.initialOffsetY + (moveEvent.clientY - dragStart.y),
+      };
+      if (rect && display) {
+        // Keep the pill inside the image display while dragging; if it
+        // cannot fit at all, fall back to the default anchored position.
+        const clamped = clampOffsetInside(
+          rect,
+          display,
+          { x: offsetX, y: offsetY },
+          next,
+        );
+        offsetX = clamped?.x ?? 0;
+        offsetY = clamped?.y ?? 0;
+      } else {
+        offsetX = next.x;
+        offsetY = next.y;
+      }
     };
 
     const handleMouseUp = () => {
@@ -91,6 +149,7 @@
      box move-drags underneath (incl. its own box's bottom edge while
      resizing); only the grip, text, and copy button opt back into hits. -->
 <div
+  bind:this={pillEl}
   role="presentation"
   class="absolute z-60 pointer-events-none select-none flex items-center gap-1.5 px-2 py-1 rounded-[4px]
          bg-[var(--surface-panel)]/95 border border-[var(--border-line)] shadow-[0_4px_16px_rgba(0,0,0,0.7),0_0_8px_var(--accent-cyan-glow)]
